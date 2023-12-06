@@ -9,6 +9,8 @@
 #include <cstring> 
 #include <ctime>
 #include <random>
+#include <chrono>
+#include <immintrin.h>
 
 #include "imgui.h"
 
@@ -25,14 +27,17 @@ const uint16_t SIGHT_RANGE = 100;
 //Initial plan
 //Hybrid linked list structure with periodic reodering to increase cache locality at expensive of intermittent memory spikes.
 
-struct boid {   //Minimum size 16 bytes
-    struct boid *next;  // 8 bytes  --- 8 remaining
-    float x;            // 2 bytes  --- 6 remaining
-    float y;            // 2 bytes  --- 4 remaining
-    float vx;          // 1 byte   --- 3 remaining //TODO DEFLOAT
-    float vy;          // 1 byte   --- 2 remaining
-    uint8_t home;                    // What to do with our last two bytes? Maybe different variants
-} typedef Boid;
+struct BoidStore {
+    float *xs;            
+    float *ys;            
+    float *vxs;          
+    float *vys;
+    int32_t *index_next;  
+    int32_t *homes;       
+    int32_t *depth;                 
+} typedef BoidStore;
+
+typedef int32_t Boid;
 
 const int screen_width = 2560;
 const int screen_height = 1440;
@@ -59,21 +64,63 @@ struct PerfMonitor {
     float rolling_average;
 } typedef PerfMonitor;
 
+void free_boidstore_members(BoidStore *boid_store) {
+    free(boid_store->index_next);
+    free(boid_store->xs);
+    free(boid_store->ys);
+    free(boid_store->vxs);
+    free(boid_store->vys);
+    free(boid_store->homes);
+    free(boid_store->depth);
+}
+
+BoidStore* new_boidstore(int to_alloc) {
+    return new BoidStore {
+        .xs = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
+        .ys = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
+        .vxs = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
+        .vys = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
+        .index_next = (int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64),
+        .homes = (int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64),
+        .depth = (int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64),
+    };
+}
+
 class BoidList {
     public:
-        Boid *m_boid_buffer;
+        BoidStore *m_boid_store;
+        BoidStore *m_backbuffer; //We're going to use a back buffer as we would need to have double the
+                                 //memory allocated at some point and this reduces calls to malloc.
         int m_size;
 
     public:
         BoidList() = delete;
-        BoidList(int size) {    
-            m_boid_buffer = new Boid[size];
+        BoidList(int size) { 
+            //We need to round up the amount of memory we are allocating as 
+            //we will be reading these as blocks of 8 floats (__m256)
+
+            //We should allocate at least 28 extra bytes so if we read the last real 
+            //float as the begining of an 8 byte block we do not overrun
+
+            int to_alloc = (size + 1);
+
+            m_boid_store = new_boidstore(to_alloc);
+            m_backbuffer = new_boidstore(to_alloc);
+
             m_size = size;
+
+            TraceLog(LOG_DEBUG, "Initialized Boid List");
         }
         
+        //Todo refactor this to only use new/delete 
         ~BoidList() {
+            free_boidstore_members(m_boid_store);
+            free_boidstore_members(m_backbuffer);
+
+            delete m_boid_store;
+            delete m_backbuffer;
+
             TraceLog(LOG_DEBUG, "Deallocated boid list");
-            delete[] m_boid_buffer;
         }
 };
 
@@ -82,14 +129,14 @@ class BoidMap {
         int m_ysize;
         int m_xsize;
         int m_cell_size; 
-        Boid **m_boid_map;
+        Boid *m_boid_map;
 
     public:
         BoidMap() = delete;
         BoidMap(const int height, const int width, const int cell_size) { 
             m_ysize = std::ceil(height / static_cast<float>(cell_size));
             m_xsize = std::ceil(width / static_cast<float>(cell_size));
-            m_boid_map = new Boid*[m_ysize * m_xsize]();
+            m_boid_map = new Boid[m_ysize * m_xsize]();
             m_cell_size = cell_size;
 
             TraceLog(LOG_DEBUG, TextFormat("Initalized map of size (%d x %d)", m_ysize, m_xsize));
@@ -100,10 +147,10 @@ class BoidMap {
             delete[] m_boid_map;
         }
         
-        Boid* get_coord(const int y, const int x) const {
+        Boid get_coord(const int y, const int x) const {
             //Little bit of safety, useful to minimize bounds checking code
             if (x < 0 || y < 0 || x >= m_xsize || y >= m_ysize) {
-                return nullptr;
+                return -1;
             }
 
             return m_boid_map[y * m_xsize + x];
@@ -117,16 +164,12 @@ class BoidMap {
             return row * m_xsize + col;
         }
 
-        Boid* get_head_from_screen_space(const Vector2 pos) const {
+        Boid get_head_from_screen_space(const Vector2 pos) const {
             return m_boid_map[get_map_pos_nearest(pos.x, pos.y)];
         }
 
-        Boid* get_absolute(const int n) const {
+        Boid get_absolute(const int n) const {
             return m_boid_map[n];
-        }
-
-        Boid** get_pointer(const int x, const int y) const {
-            return nullptr;
         }
 
         int get_map_pos(const int x, const int y) const {
@@ -143,13 +186,14 @@ void rebuild_list(BoidList& boid_list, BoidMap& boid_map) {
     //Track how many children (depth) of each boid
     //Then we can rebuild multithreaded.
 
+    /*
     Boid *new_boid_buffer = new Boid[boid_list.m_size];
     int index = 0;
 
     for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
-        Boid *current = boid_map.get_absolute(i);
+        Boid current = boid_map.get_absolute(i);
         
-        while (current != nullptr) {
+        while (current != -1) {
             new_boid_buffer[index] = *current;
             current = current->next;
             index++;
@@ -158,33 +202,58 @@ void rebuild_list(BoidList& boid_list, BoidMap& boid_map) {
 
     delete[] boid_list.m_boid_buffer;
     boid_list.m_boid_buffer = new_boid_buffer;
+    */
+
+    auto main_buffer = boid_list.m_boid_store;
+    auto back_buffer = boid_list.m_backbuffer;
+
+    int index = 0;
+    for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
+        Boid current = boid_map.get_absolute(i);
+        
+        while (current != -1) {
+
+            back_buffer->index_next[index] = main_buffer->index_next[current];
+            back_buffer->xs[index] = main_buffer->xs[current];
+            back_buffer->ys[index] = main_buffer->ys[current];
+            back_buffer->vxs[index] = main_buffer->vxs[current];
+            back_buffer->vys[index] = main_buffer->vys[current];
+            back_buffer->homes[index] = main_buffer->homes[current];
+
+            current = main_buffer->index_next[current];
+            index++;
+        }
+    }
+
+    boid_list.m_boid_store = back_buffer;
+    boid_list.m_backbuffer = main_buffer;
 }
 
 void populate_map(BoidList& boid_list, BoidMap& map) {
     for (int i = 0; i < map.m_xsize * map.m_ysize; i++) {
-        map.m_boid_map[i] = nullptr;
+        map.m_boid_map[i] = -1;
     }
 
     for (int i = 0; i < boid_list.m_size; i++) {
-        Boid *current = &boid_list.m_boid_buffer[i];
-        int map_pos = map.get_map_pos_nearest(current->x, current->y);
-        Boid *head = map.m_boid_map[map_pos];
-        map.m_boid_map[map_pos] = current;
-        current->next = head;
-
-        //cout << "i:" << i << "c: " << current << "\t n:" << current->next << endl;
+        Boid boid_to_place = i;
+        int map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]); //No one said that vectorization would be pretty...
+        Boid old_head = map.m_boid_map[map_pos];
+        map.m_boid_map[map_pos] = boid_to_place;
+        boid_list.m_boid_store->index_next[boid_to_place] = old_head;
     }
 }
 
-
+/*
 void print_boid(Boid *boid) {
     TraceLog(LOG_DEBUG, TextFormat("{next: %p, x: %d, y: %d}", boid->next, boid->x, boid->y));
 }
+*/
 
-void do_something_to_cell(BoidMap& map, const int x, const int y, const Rules& rules, Boid* selected_boid) {
-    Boid *cell_to_update = map.get_coord(y, x);
+void do_something_to_cell(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
+    Boid cell_to_update = map.get_coord(y, x);
 
-    Boid *neighbours[9] =  {
+    
+    Boid neighbours[9] =  {
         map.get_coord(y-1, x-1), map.get_coord(y-1, x), map.get_coord(y-1, x+1),
         map.get_coord(y,   x-1), map.get_coord(y,   x), map.get_coord(y,   x+1),
         map.get_coord(y+1, x-1), map.get_coord(y+1, x), map.get_coord(y+1, x+1),
@@ -192,13 +261,12 @@ void do_something_to_cell(BoidMap& map, const int x, const int y, const Rules& r
 
     //int limit = 100;
     //Boid **test = new Boid*[limit];
-    std::vector<Boid*> cell_wide_candidates;
+    std::vector<Boid> cell_wide_candidates;
     cell_wide_candidates.reserve(100);
-
-    for (Boid *n : neighbours) {
+    for (Boid n : neighbours) {
         //if (track >= limit - 1) break;
-        Boid *current = n;
-        while (current != nullptr) {
+        Boid current = n;
+        while (current != -1) {
             //error_test.push_back(track2);
             cell_wide_candidates.push_back(current);
             //test[track] = current;
@@ -208,18 +276,24 @@ void do_something_to_cell(BoidMap& map, const int x, const int y, const Rules& r
             //This is a reasonable use of goto, need to break out of nested loops.
             //if (track >= limit) goto double_break;
 
-            current = current->next;
+            current = boid_list.m_boid_store->index_next[current];
             //cout << track << '\n';
         }
     }
     double_break:
 
-
     //Now we have most the information we need
     //Do the calculations for each boid    
-    Boid *current_boid = cell_to_update;
+    Boid current_boid = cell_to_update;
 
-    while (current_boid != nullptr) {
+    auto xs = boid_list.m_boid_store->xs;
+    auto ys = boid_list.m_boid_store->ys;
+    auto vxs = boid_list.m_boid_store->vxs;
+    auto vys = boid_list.m_boid_store->vys;
+
+
+    while (current_boid != -1) {
+        //TraceLog(LOG_DEBUG, TextFormat("CB: %d", current_boid));
         //Variables for tracking seperation force
         float sep_x = 0, sep_y = 0;
 
@@ -235,30 +309,30 @@ void do_something_to_cell(BoidMap& map, const int x, const int y, const Rules& r
             //auto nearby_boid = test[i];
             //DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, YELLOW);
         for (auto nearby_boid : cell_wide_candidates) {
-            int_fast32_t dist_squared = (current_boid->x - nearby_boid->x) * (current_boid->x - nearby_boid->x) + (current_boid->y - nearby_boid->y) * (current_boid->y - nearby_boid->y);
+            int_fast32_t dist_squared = (xs[current_boid] - xs[nearby_boid]) * (xs[current_boid] - xs[nearby_boid]) + (ys[current_boid] - ys[nearby_boid]) * (ys[current_boid] - ys[nearby_boid]);
             if (dist_squared < rules.sight_range_squared) {
                 if (dist_squared < rules.avoid_distance_squared) {
                     //If too close
                     //We are currently counting this boid. testing required.
-                    sep_x += (current_boid->x - nearby_boid->x) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
-                    sep_y += (current_boid->y - nearby_boid->y) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
+                    sep_x += (xs[current_boid] - xs[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
+                    sep_y += (ys[current_boid] - ys[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
 
-                    if (rules.show_lines || (current_boid == selected_boid)) DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, RED);
+                    //if (rules.show_lines || (current_boid == selected_boid)) DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, RED);
                 } else {
                     //If in sight
-                    avg_vx += nearby_boid->vx;
-                    avg_vy += nearby_boid->vy;
-                    avg_x  += nearby_boid->x;
-                    avg_y  += nearby_boid->y;
+                    avg_vx += vxs[nearby_boid];
+                    avg_vy += vys[nearby_boid];
+                    avg_x  += xs[nearby_boid];
+                    avg_y  += ys[nearby_boid];
                     in_sight_counter++;
-                    if (rules.show_lines || (current_boid == selected_boid)) DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, GREEN);
+                    //if (rules.show_lines || (current_boid == selected_boid)) DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, GREEN);
                 }
             }
         }
 
         //Avoidance
-        current_boid->vx += sep_x * rules.avoid_factor;
-        current_boid->vy += sep_y * rules.avoid_factor;
+        vxs[current_boid] += sep_x * rules.avoid_factor;
+        vys[current_boid] += sep_y * rules.avoid_factor;
 
         //TODO see if this is more performant branchless
         if (in_sight_counter) {
@@ -267,35 +341,37 @@ void do_something_to_cell(BoidMap& map, const int x, const int y, const Rules& r
             avg_vx = avg_vx/in_sight_counter;
             avg_vy = avg_vy/in_sight_counter;
 
-            current_boid->vx += (avg_vx - current_boid->vx) * rules.alignment_factor;
-            current_boid->vy += (avg_vy - current_boid->vy) * rules.alignment_factor;
+            vxs[current_boid] += (avg_vx - vxs[current_boid]) * rules.alignment_factor;
+            vys[current_boid] += (avg_vy - vys[current_boid]) * rules.alignment_factor;
 
             //Cohesion
             avg_x = avg_x/in_sight_counter;
             avg_y = avg_y/in_sight_counter;
 
-            current_boid->vx += (avg_x - current_boid->x) * rules.cohesion_factor;
-            current_boid->vy += (avg_y - current_boid->y) * rules.cohesion_factor;
+            vxs[current_boid] += (avg_x - xs[current_boid]) * rules.cohesion_factor;
+            vys[current_boid] += (avg_y - ys[current_boid]) * rules.cohesion_factor;
         }
 
-
+        /*
         if ((rules.show_lines || (current_boid == selected_boid)) && current_boid->next != nullptr) {
             DrawLine(current_boid->x, current_boid->y, current_boid->next->x, current_boid->next->y, BLUE);
         }
-
+        
         if (current_boid == selected_boid) TraceLog(LOG_DEBUG, TextFormat("FORCES: SEP: [%f, %f], ALIGN: [%f, %f], COHESION: [%f, %f]", sep_x * rules.avoid_factor, sep_y * rules.avoid_factor, (avg_vx - current_boid->vx) * rules.alignment_factor, (avg_vy - current_boid->vy) * rules.alignment_factor, (avg_x - current_boid->x) * rules.cohesion_factor, (avg_y - current_boid->y) * rules.cohesion_factor));
-        current_boid = current_boid->next;
+        */
+        current_boid = boid_list.m_boid_store->index_next[current_boid];
     }
-
     //delete[] test;
 }
 
+/*
 void push_boids(const BoidList& boids) {
     for (int i = 0; i < boids.m_size; i++) {
         boids.m_boid_buffer[i].x += boids.m_boid_buffer[i].vx;
         boids.m_boid_buffer[i].y += boids.m_boid_buffer[i].vy;
     }
 }
+*/
 
 void UpdateRulesWindow(Rules &rules) {
         ImGui::Begin("Boids Settings");
@@ -362,26 +438,30 @@ int main () {
 
     //Populate some test boids
     for (int i = 0; i < boid_list.m_size; i++) {
-        Boid b {
-            .next = nullptr,
-            .x = width_distribution(generator),
-            .y = height_distribution(generator),
-            .vx = (std::rand() % 3) - 1,
-            .vy = (std::rand() % 3) - 1,
-            .home = rand() % 144,
-        };
-
-        boid_list.m_boid_buffer[i] = b;
+        boid_list.m_boid_store->index_next[i] = -1;
+        boid_list.m_boid_store->xs[i] = width_distribution(generator);
+        boid_list.m_boid_store->ys[i] = height_distribution(generator);
+        boid_list.m_boid_store->vxs[i] = (std::rand() % 3) - 1;
+        boid_list.m_boid_store->vys[i] = (std::rand() % 3) - 1;
+        boid_list.m_boid_store->homes[i] = rand() % 144;
     }
 
 
     populate_map(boid_list, boid_map);
 
+    auto xs = boid_list.m_boid_store->xs;
+    auto ys = boid_list.m_boid_store->ys;
+    auto vxs = boid_list.m_boid_store->vxs;
+    auto vys = boid_list.m_boid_store->vys;
+    auto homes = boid_list.m_backbuffer->homes;
+    auto index_nexts = boid_list.m_boid_store->index_next;
+
+
 
     rlImGuiSetup(true);
     
 
-    Boid *selected_boid = nullptr;
+    Boid selected_boid = -1;
     bool rebuild_scheduled = false;
 
     while (WindowShouldClose() == false){
@@ -412,53 +492,55 @@ int main () {
             
             if (rebuild_scheduled) {
                 rebuild_list(boid_list, boid_map);
-                selected_boid = nullptr;
+                selected_boid = -1;
                 rebuild_scheduled = false;
             }
-            
             populate_map(boid_list, boid_map);
 
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                 auto mouse_pos = GetScreenToWorld2D(GetMousePosition(), cam);
-                Boid* current = boid_map.get_head_from_screen_space(mouse_pos);
+                Boid current = boid_map.get_head_from_screen_space(mouse_pos);
                 float min_dist = -1;
-                Boid* nearest = nullptr;
+                Boid nearest = -1;
 
-                while (current != nullptr) {
-                    float dist = Vector2DistanceSqr(mouse_pos, Vector2 {current->x, current->y});
+                while (current != -1) {
+                    float dist = Vector2DistanceSqr(mouse_pos, Vector2 {xs[current], ys[current]});
                     if (min_dist == -1 || dist < min_dist) {
                         nearest = current;
                         min_dist = dist;
                     }
-                    current = current->next;
+                    current = index_nexts[current];
                 }
 
                 selected_boid = nearest;
                 //Traverse node that contains mouse
             }
 
+            auto t_start = std::chrono::high_resolution_clock::now();
             for (int y = 0; y < boid_map.m_ysize; y++) {
                 for (int x = 0; x < boid_map.m_xsize; x++) {
-                    do_something_to_cell(boid_map, x, y, rules, selected_boid);
+                    do_something_to_cell(boid_map, x, y, rules, selected_boid, boid_list);
                 }
             }
-            
-            //This shoudl be easy to be simple to vectorize
-            for (int i = 0; i < boid_list.m_size; i++) {
-                Boid &boid = boid_list.m_boid_buffer[i];   
+            auto t_end = std::chrono::high_resolution_clock::now();
+            //TraceLog(LOG_DEBUG, TextFormat("%0.12f", std::chrono::duration<double, std::milli>(t_end-t_start).count()));
 
+            //This should be easy to be simple to vectorize
+            for (int i = 0; i < boid_list.m_size; i++) {
+                Boid boid = i;   
+                
                 //Window edges, todo replace with old function
-                if (boid.x > (world_width - rules.edge_width)) {
-                    boid.vx -= rules.edge_factor;
+                if (xs[boid] > (world_width - rules.edge_width)) {
+                    vxs[boid] -= rules.edge_factor;
                 }
-                if (boid.x < rules.edge_width) {
-                    boid.vx += rules.edge_factor;
+                if (xs[boid] < rules.edge_width) {
+                    vxs[boid] += rules.edge_factor;
                 } 
-                if (boid.y > (world_height - rules.edge_width)) {
-                    boid.vy -= rules.edge_factor;
+                if (ys[boid] > (world_height - rules.edge_width)) {
+                    vys[boid] -= rules.edge_factor;
                 } 
-                if (boid.y < rules.edge_width) {
-                    boid.vy += rules.edge_factor;
+                if (ys[boid] < rules.edge_width) {
+                    vys[boid] += rules.edge_factor;
                 } 
 
 
@@ -466,35 +548,35 @@ int main () {
                 float rx = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
                 float ry = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
 
-                boid.vx += rx * rules.rand;
-                boid.vy += ry * rules.rand;
+                vxs[boid] += rx * rules.rand;
+                vys[boid] += ry * rules.rand;
 
 
                 //Apply homing
-                int hy = boid.home / 16;
-                int hx = boid.home % 16;
+                int hy = homes[boid] / 16;
+                int hx = homes[boid] % 16;
 
                 float px = hx * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
                 float py = hy * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
 
 
-                float dx = px - boid.x;
-                float dy = py - boid.y;
+                float dx = px - xs[boid];
+                float dy = py - ys[boid];
 
-                boid.vx += dx * rules.homing;
-                boid.vy += dy * rules.homing;
+                vxs[boid] += dx * rules.homing;
+                vys[boid] += dy * rules.homing;
 
-                float speed = sqrtf((boid.vx*boid.vx) + (boid.vy*boid.vy));
+                float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
 
                 if (speed > 0)
                 {
                     float ispeed = 1.0f/speed;
-                    boid.vx = boid.vx*ispeed * 3;
-                    boid.vy = boid.vy*ispeed * 3;
+                    vxs[boid] = vxs[boid]*ispeed * 3;
+                    vys[boid] = vys[boid]*ispeed * 3;
                 }
                 
-                boid.x += boid.vx;
-                boid.y += boid.vy;
+                xs[boid] += vxs[boid];
+                ys[boid] += vys[boid];
             }
 
             Vector2 ball_pos2 {0, 0};
@@ -506,16 +588,16 @@ int main () {
             
             for (int i = 0; i < boid_list.m_size; i++) {
                 rlPushMatrix();
-                    rlTranslatef(boid_list.m_boid_buffer[i].x, boid_list.m_boid_buffer[i].y, 0);
-                    float angle = (atan2(boid_list.m_boid_buffer[i].vx , boid_list.m_boid_buffer[i].vy) * 360.) / (2 * PI);
+                    rlTranslatef(xs[i], ys[i], 0);
+                    float angle = (atan2(vxs[i], vys[i]) * 360.) / (2 * PI);
                     rlRotatef(angle, 0, 0, -1);
                     DrawTriangle(v3, v2, v1, WHITE);
                 rlPopMatrix();
             }
 
-            
+            /*
             auto trav = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
-            while (trav != nullptr) {
+            while (trav != -1) {
                 rlPushMatrix();
                     rlTranslatef(trav->x, trav->y, 0);
                     float angle = (atan2(trav->vx , trav->vy) * 360.) / (2 * PI);
@@ -535,7 +617,7 @@ int main () {
                     DrawTriangle(v3, v2, v1, RED);
                 rlPopMatrix();
             }
-
+            */
             //Draw grid
             for (int y = 0; y < boid_map.m_ysize; y++) {
                 DrawLine(0, y*boid_map.m_cell_size, boid_map.m_xsize*boid_map.m_cell_size, y*boid_map.m_cell_size, GRAY);
