@@ -109,7 +109,7 @@ class BoidList {
 
             m_size = size;
 
-            TraceLog(LOG_DEBUG, "Initialized Boid List");
+            TraceLog(LOG_DEBUG, TextFormat("Initialized Boid List of size %d", size));
         }
         
         //Todo refactor this to only use new/delete 
@@ -182,47 +182,41 @@ class BoidMap {
 
 
 void rebuild_list(BoidList& boid_list, BoidMap& boid_map) {
-    //Idea todo:
-    //Track how many children (depth) of each boid
-    //Then we can rebuild multithreaded.
+    BoidStore *main_buffer = boid_list.m_boid_store;
+    BoidStore *back_buffer = boid_list.m_backbuffer;
 
-    /*
-    Boid *new_boid_buffer = new Boid[boid_list.m_size];
     int index = 0;
-
     for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
+        //Set current to the head node of the current cell (i)
         Boid current = boid_map.get_absolute(i);
         
-        while (current != -1) {
-            new_boid_buffer[index] = *current;
-            current = current->next;
-            index++;
+
+        //Then update the position in the map to the new position of this head node
+        if (current != -1) {
+            boid_map.m_boid_map[i] = index;
         }
-    }
-
-    delete[] boid_list.m_boid_buffer;
-    boid_list.m_boid_buffer = new_boid_buffer;
-    */
-
-    auto main_buffer = boid_list.m_boid_store;
-    auto back_buffer = boid_list.m_backbuffer;
-
-    int index = 0;
-    for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
-        Boid current = boid_map.get_absolute(i);
         
         while (current != -1) {
-
-            back_buffer->index_next[index] = main_buffer->index_next[current];
             back_buffer->xs[index] = main_buffer->xs[current];
             back_buffer->ys[index] = main_buffer->ys[current];
             back_buffer->vxs[index] = main_buffer->vxs[current];
             back_buffer->vys[index] = main_buffer->vys[current];
             back_buffer->homes[index] = main_buffer->homes[current];
+            back_buffer->depth[index] = main_buffer->depth[current];
 
-            current = main_buffer->index_next[current];
+            Boid next = main_buffer->index_next[current];
+            
+            if (next != -1) {
+                back_buffer->index_next[index] = index + 1;
+            } else {
+                back_buffer->index_next[index] = -1;
+            }
+            
+            current = next;
             index++;
         }
+
+        
     }
 
     boid_list.m_boid_store = back_buffer;
@@ -234,12 +228,17 @@ void populate_map(BoidList& boid_list, BoidMap& map) {
         map.m_boid_map[i] = -1;
     }
 
+    //todo slight problem here is that we are WILL reverse the memory positions in each cell each update.
+    //Maybe we can fix this writing into the new list in reverse order in the rebuild list function (Use the depth to work out correct positions).
+    //Or we can fix this by building our linked list s.t. the first boid we find in a cell will stay as the head.
+    //This would be performance intensive.
     for (int i = 0; i < boid_list.m_size; i++) {
         Boid boid_to_place = i;
         int map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]); //No one said that vectorization would be pretty...
         Boid old_head = map.m_boid_map[map_pos];
         map.m_boid_map[map_pos] = boid_to_place;
         boid_list.m_boid_store->index_next[boid_to_place] = old_head;
+        boid_list.m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list.m_boid_store->depth[old_head] + 1 : 1;
     }
 }
 
@@ -453,9 +452,8 @@ int main () {
     auto ys = boid_list.m_boid_store->ys;
     auto vxs = boid_list.m_boid_store->vxs;
     auto vys = boid_list.m_boid_store->vys;
-    auto homes = boid_list.m_backbuffer->homes;
+    auto homes = boid_list.m_boid_store->homes;
     auto index_nexts = boid_list.m_boid_store->index_next;
-
 
 
     rlImGuiSetup(true);
@@ -465,6 +463,17 @@ int main () {
     bool rebuild_scheduled = false;
 
     while (WindowShouldClose() == false){
+
+        populate_map(boid_list, boid_map);
+        rebuild_list(boid_list, boid_map);
+
+        xs = boid_list.m_boid_store->xs;
+        ys = boid_list.m_boid_store->ys;
+        vxs = boid_list.m_boid_store->vxs;
+        vys = boid_list.m_boid_store->vys;
+        homes = boid_list.m_boid_store->homes;
+        index_nexts = boid_list.m_boid_store->index_next;
+
         BeginDrawing();
             ClearBackground(BLACK);
             BeginMode2D(cam);
@@ -490,13 +499,6 @@ int main () {
                     cam.zoom = 0.125f;
             }
             
-            if (rebuild_scheduled) {
-                rebuild_list(boid_list, boid_map);
-                selected_boid = -1;
-                rebuild_scheduled = false;
-            }
-            populate_map(boid_list, boid_map);
-
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                 auto mouse_pos = GetScreenToWorld2D(GetMousePosition(), cam);
                 Boid current = boid_map.get_head_from_screen_space(mouse_pos);
@@ -513,7 +515,6 @@ int main () {
                 }
 
                 selected_boid = nearest;
-                //Traverse node that contains mouse
             }
 
             auto t_start = std::chrono::high_resolution_clock::now();
@@ -595,19 +596,19 @@ int main () {
                 rlPopMatrix();
             }
 
-            /*
+            
             auto trav = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
             while (trav != -1) {
                 rlPushMatrix();
-                    rlTranslatef(trav->x, trav->y, 0);
-                    float angle = (atan2(trav->vx , trav->vy) * 360.) / (2 * PI);
+                    rlTranslatef(xs[trav], ys[trav], 0);
+                    float angle = (atan2(vxs[trav], vys[trav]) * 360.) / (2 * PI);
                     rlRotatef(angle, 0, 0, -1);
                     DrawTriangle(v3, v2, v1, BLUE);
                 rlPopMatrix();
 
-                trav = trav->next;
+                trav = index_nexts[trav];
             }
-
+            /*
             //Highlight selected boid
             if (selected_boid != nullptr) {
                 rlPushMatrix();
