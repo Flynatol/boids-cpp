@@ -11,6 +11,7 @@
 #include <random>
 #include <chrono>
 #include <immintrin.h>
+#include <fstream>
 
 #include "imgui.h"
 
@@ -18,11 +19,21 @@
 
 #include <rlImGui.h>
 
+std::ofstream myfile;
+
 const float TRIANGLE_SIZE = 5.f;
 const uint32_t NUM_BOIDS = 75000;
 const uint16_t SIGHT_RANGE = 100;
 
+static const Vector2 triangle[3] = {
+    Vector2 {0.f, 2 * TRIANGLE_SIZE},
+    Vector2 {-TRIANGLE_SIZE, -2 * TRIANGLE_SIZE},
+    Vector2 {TRIANGLE_SIZE, -2 * TRIANGLE_SIZE}
+};
 
+//#define DEBUG(...) myfile << TextFormat(__VA_ARGS__) << '\n';
+//#define DEBUG(...) ;
+#define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
 
 //Initial plan
 //Hybrid linked list structure with periodic reodering to increase cache locality at expensive of intermittent memory spikes.
@@ -181,16 +192,17 @@ class BoidMap {
 };
 
 
-void rebuild_list(BoidList& boid_list, BoidMap& boid_map) {
+Boid rebuild_list(BoidList& boid_list, BoidMap& boid_map, Boid to_track) {
     BoidStore *main_buffer = boid_list.m_boid_store;
     BoidStore *back_buffer = boid_list.m_backbuffer;
+
+    Boid new_pos = -1;
 
     int index = 0;
     for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
         //Set current to the head node of the current cell (i)
         Boid current = boid_map.get_absolute(i);
         
-
         //Then update the position in the map to the new position of this head node
         if (current != -1) {
             boid_map.m_boid_map[i] = index;
@@ -205,6 +217,8 @@ void rebuild_list(BoidList& boid_list, BoidMap& boid_map) {
             back_buffer->depth[index] = main_buffer->depth[current];
 
             Boid next = main_buffer->index_next[current];
+
+            if (current == to_track) new_pos = index;
             
             if (next != -1) {
                 back_buffer->index_next[index] = index + 1;
@@ -214,13 +228,13 @@ void rebuild_list(BoidList& boid_list, BoidMap& boid_map) {
             
             current = next;
             index++;
-        }
-
-        
+        }        
     }
 
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
+
+    return new_pos;
 }
 
 void populate_map(BoidList& boid_list, BoidMap& map) {
@@ -247,130 +261,360 @@ void print_boid(Boid *boid) {
     TraceLog(LOG_DEBUG, TextFormat("{next: %p, x: %d, y: %d}", boid->next, boid->x, boid->y));
 }
 */
+template <typename T, typename U>
+union ExtractVec {
+    U vector;
+    T data[8];
+};
 
-void do_something_to_cell(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
-    Boid cell_to_update = map.get_coord(y, x);
 
-    
-    Boid neighbours[9] =  {
-        map.get_coord(y-1, x-1), map.get_coord(y-1, x), map.get_coord(y-1, x+1),
-        map.get_coord(y,   x-1), map.get_coord(y,   x), map.get_coord(y,   x+1),
-        map.get_coord(y+1, x-1), map.get_coord(y+1, x), map.get_coord(y+1, x+1),
-    };
-
-    //int limit = 100;
-    //Boid **test = new Boid*[limit];
-    std::vector<Boid> cell_wide_candidates;
-    cell_wide_candidates.reserve(100);
-    for (Boid n : neighbours) {
-        //if (track >= limit - 1) break;
-        Boid current = n;
-        while (current != -1) {
-            //error_test.push_back(track2);
-            cell_wide_candidates.push_back(current);
-            //test[track] = current;
-            //cout << "\t" << current << "    size" << cell_wide_candidates.size() << endl;
-            //track++;
-
-            //This is a reasonable use of goto, need to break out of nested loops.
-            //if (track >= limit) goto double_break;
-
-            current = boid_list.m_boid_store->index_next[current];
-            //cout << track << '\n';
-        }
+template <typename T, typename U>
+void debug_vector(U vector, const char* format) {
+    ExtractVec<T, U> vec = {vector};
+    for (int i = 0; i < 8; i++) {
+        DEBUG(format, vec.data[i]);
     }
-    double_break:
-
-    //Now we have most the information we need
-    //Do the calculations for each boid    
-    Boid current_boid = cell_to_update;
-
-    auto xs = boid_list.m_boid_store->xs;
-    auto ys = boid_list.m_boid_store->ys;
-    auto vxs = boid_list.m_boid_store->vxs;
-    auto vys = boid_list.m_boid_store->vys;
+}
 
 
-    while (current_boid != -1) {
-        //TraceLog(LOG_DEBUG, TextFormat("CB: %d", current_boid));
-        //Variables for tracking seperation force
-        float sep_x = 0, sep_y = 0;
+inline __m256i vector_sum(__m256i v) {
+    auto temp = _mm256_hadd_epi32(v, v);
+    temp = _mm256_hadd_epi32(temp, temp);
+    auto fliptemp = (__m256i) _mm256_permute2f128_ps((__m256) temp, (__m256) temp, 1);
+    return _mm256_add_epi32(temp, fliptemp);
+}
 
-        //Variables for tracking aligment
-        float avg_vx = 0, avg_vy = 0;
+inline __m256 vector_sum(__m256 v) {
+    auto temp = _mm256_hadd_ps(v, v);
+    temp = _mm256_hadd_ps(temp, temp);
+    auto fliptemp = _mm256_permute2f128_ps(temp, temp, 1); 
+    return _mm256_add_ps(temp, fliptemp);
+}
 
-        //Variables for tracking cohesion
-        float avg_x = 0, avg_y = 05;
+void update_cell(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
+    Boid cell_to_update = map.get_coord(y, x);
+    if (cell_to_update == -1 ) return;
 
-        uint_fast16_t in_sight_counter = 0; 
+    const auto xs = boid_list.m_boid_store->xs;
+    const auto ys = boid_list.m_boid_store->ys;
+    const auto vxs = boid_list.m_boid_store->vxs;
+    const auto vys = boid_list.m_boid_store->vys;
+    
+    Boid cell_begin = cell_to_update;
+    Boid cell_end = cell_begin + boid_list.m_boid_store->depth[cell_begin];
 
-        //for (int i = 0; i < track; i++) {
-            //auto nearby_boid = test[i];
-            //DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, YELLOW);
-        for (auto nearby_boid : cell_wide_candidates) {
-            int_fast32_t dist_squared = (xs[current_boid] - xs[nearby_boid]) * (xs[current_boid] - xs[nearby_boid]) + (ys[current_boid] - ys[nearby_boid]) * (ys[current_boid] - ys[nearby_boid]);
-            if (dist_squared < rules.sight_range_squared) {
-                if (dist_squared < rules.avoid_distance_squared) {
-                    //If too close
-                    //We are currently counting this boid. testing required.
-                    sep_x += (xs[current_boid] - xs[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
-                    sep_y += (ys[current_boid] - ys[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
+    for (int cy = -1; cy <= 1; cy++) {
+        //Work out the memory range we're calculating on
+        Boid row_begin = -1;
+        Boid row_end = -1;
 
-                    //if (rules.show_lines || (current_boid == selected_boid)) DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, RED);
-                } else {
-                    //If in sight
-                    avg_vx += vxs[nearby_boid];
-                    avg_vy += vys[nearby_boid];
-                    avg_x  += xs[nearby_boid];
-                    avg_y  += ys[nearby_boid];
-                    in_sight_counter++;
-                    //if (rules.show_lines || (current_boid == selected_boid)) DrawLine(current_boid->x, current_boid->y, nearby_boid->x, nearby_boid->y, GREEN);
-                }
+        //Todo check if this would be faster branchless
+        for (int cx = -1; cx <= 1; cx++) {
+            Boid current = map.get_coord(y + cy, x + cx);
+            if (current != -1) {
+                if (row_begin == -1) row_begin = current;
+                row_end = current + boid_list.m_boid_store->depth[current];
             }
         }
+        
+        //Check if any cells have work for us
+        if (row_begin != -1) { 
+            //For each boid in current cell
+            for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid++) {
+                float sep_x = 0, sep_y = 0;
 
-        //Avoidance
-        vxs[current_boid] += sep_x * rules.avoid_factor;
-        vys[current_boid] += sep_y * rules.avoid_factor;
+                //Variables for tracking aligment
+                float avg_vx = 0, avg_vy = 0;
 
-        //TODO see if this is more performant branchless
-        if (in_sight_counter) {
+                //Variables for tracking cohesion
+                float avg_x = 0, avg_y = 0;
+                
+                //Remember to mask before summation!
+                __m256 sep_x_vec = _mm256_set1_ps(0.);
+                __m256 sep_y_vec = _mm256_set1_ps(0.);
+                __m256 avg_x_vec = _mm256_set1_ps(0.);
+                __m256 avg_y_vec = _mm256_set1_ps(0.);
+                __m256 avg_vx_vec = _mm256_set1_ps(0.);
+                __m256 avg_vy_vec = _mm256_set1_ps(0.);
 
-            //Alignment
-            avg_vx = avg_vx/in_sight_counter;
-            avg_vy = avg_vy/in_sight_counter;
+                uint_fast16_t in_sight_counter = 0; 
+                __m256i isc = _mm256_set1_epi32(0);
 
-            vxs[current_boid] += (avg_vx - vxs[current_boid]) * rules.alignment_factor;
-            vys[current_boid] += (avg_vy - vys[current_boid]) * rules.alignment_factor;
+                __m256i read_mask;
+                __m256i read_mask_rev;
 
-            //Cohesion
-            avg_x = avg_x/in_sight_counter;
-            avg_y = avg_y/in_sight_counter;
+                
+                //Check against each boid in the row currently being processed
+                for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid++) {
+                    int bytes_left = row_end - nearby_boid; 
+                    //read_mask       = _mm256_set_epi32(0, (bytes_left < 1) * 0xFFFF, (bytes_left < 2) * 0xFFFF, (bytes_left < 3) * 0xFFFF, (bytes_left < 4) * 0xFFFF, (bytes_left < 5) * 0xFFFF, (bytes_left < 6) * 0xFFFF, (bytes_left < 7) * 0xFFFF);
+                    //read_mask_rev   = _mm256_set_epi32((bytes_left < 7) * 0xFFFF, (bytes_left < 6) * 0xFFFF, (bytes_left < 5) * 0xFFFF, (bytes_left < 4) * 0xFFFF, (bytes_left < 3) * 0xFFFF, (bytes_left < 2) * 0xFFFF, (bytes_left < 1) * 0xFFFF, 0);
+                    /*
+                    read_mask_rev = _mm256_set1_epi32(0);
+                    const auto nearby_xs_vec = _mm256_loadu_ps(&xs[nearby_boid]);
+                    const auto nearby_ys_vec = _mm256_loadu_ps(&ys[nearby_boid]);
 
-            vxs[current_boid] += (avg_x - xs[current_boid]) * rules.cohesion_factor;
-            vys[current_boid] += (avg_y - ys[current_boid]) * rules.cohesion_factor;
+                    const auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
+                    const auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
+
+                    const auto current_xs_vec = _mm256_set1_ps(xs[current_boid]);
+                    const auto current_ys_vec = _mm256_set1_ps(xs[current_boid]);              
+                    */
+                    int_fast32_t dist_squared = (xs[current_boid] - xs[nearby_boid]) * (xs[current_boid] - xs[nearby_boid]) + (ys[current_boid] - ys[nearby_boid]) * (ys[current_boid] - ys[nearby_boid]);
+                    
+                    /*
+                    auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
+                    auto ys_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
+                    auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
+
+                    //this can be moved
+                    const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
+                    */
+                    const bool pc_srs = dist_squared < rules.sight_range_squared;
+                    //const auto srs_mask = _mm256_cmp_ps(ds_vec, _mm256_set1_ps(rules.sight_range_squared), _CMP_LE_OS);
+
+                    const bool pc_ads = dist_squared < rules.avoid_distance_squared;
+                    //const auto ads_mask = _mm256_cmp_ps(ds_vec, _mm256_set1_ps(rules.avoid_distance_squared), _CMP_LE_OS);
+
+                    const bool in_sight_but_not_avoid = !pc_ads & pc_srs;
+                    //Warning - not a bit mask!
+                    //const auto sna_fpmask = _mm256_and_ps(_mm256_andnot_ps(ads_mask, srs_mask), _mm256_set1_ps(1.));
+
+                    //const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec);
+                    //const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds);
+                    
+                    sep_x += (pc_ads) * (xs[current_boid] - xs[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
+                    sep_y += (pc_ads) * (ys[current_boid] - ys[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
+                    
+                    //sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr)));
+                    //sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr)));
+
+                    avg_vx += in_sight_but_not_avoid * vxs[nearby_boid];
+                    avg_vy += in_sight_but_not_avoid * vys[nearby_boid];
+
+                    //avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec);
+                    //avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec);
+
+                    avg_x  += in_sight_but_not_avoid * xs[nearby_boid];
+                    avg_y  += in_sight_but_not_avoid * ys[nearby_boid];
+
+                    //avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec);
+                    //avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec);
+
+                    //DEBUG("s: %f", xs[nearby_boid]);
+                    //DEBUG("s: %f", (pc_ads) * (xs[current_boid] - xs[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared));
+
+                    //DEBUG("s: %d", in_sight_but_not_avoid);
+                    in_sight_counter += in_sight_but_not_avoid;
+                    //in_sight_counter++;
+                    //isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
+                }
+                
+
+                for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
+                    int bytes_left = row_end - nearby_boid; 
+                    read_mask = _mm256_set_epi32((bytes_left > 7) * 0xFFFFFFFF, (bytes_left > 6) * 0xFFFFFFFF, (bytes_left > 5) * 0xFFFFFFFF, (bytes_left > 4) * 0xFFFFFFFF, (bytes_left > 3) * 0xFFFFFFFF, (bytes_left > 2) * 0xFFFFFFFF, (bytes_left > 1) * 0xFFFFFFFF, 0xFFFFFFFF);
+
+                    const auto nearby_xs_vec = _mm256_loadu_ps(&xs[nearby_boid]);
+                    const auto nearby_ys_vec = _mm256_loadu_ps(&ys[nearby_boid]);
+
+                    const auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
+                    const auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
+
+                    const auto current_xs_vec = _mm256_set1_ps(xs[current_boid]);
+                    const auto current_ys_vec = _mm256_set1_ps(ys[current_boid]);              
+                    
+                    auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
+                    auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
+                    auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
+
+                    //this can be moved
+                    const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
+
+                    const auto srs_mask = _mm256_cmp_ps(ds_vec, _mm256_set1_ps(rules.sight_range_squared), _CMP_LT_OS); 
+
+                    const auto ads_mask = _mm256_cmp_ps(ds_vec, _mm256_set1_ps(rules.avoid_distance_squared), _CMP_LT_OS);
+
+                    //Warning - not a bit mask!
+                    const auto sna_fpmask = _mm256_and_ps(_mm256_andnot_ps(ads_mask, srs_mask), _mm256_set1_ps(1.));
+
+                    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec);
+                    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds);
+                    
+                    //sep_x_vec = _mm256_and_ps(_mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))), (__m256) read_mask);
+                    //sep_y_vec = _mm256_and_ps(_mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))), (__m256) read_mask);
+                    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr)));
+                    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr)));
+
+
+                    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec);
+                    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec);
+
+                    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec);
+                    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec);
+
+                    isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
+                    
+                    //DEBUG("to read: %d", bytes_left);
+                    //DEBUG("RANGE: %f", rules.sight_range_squared);
+
+                    //debug_vector<float, __m256>(_mm256_and_ps((__m256) read_mask, nearby_xs_vec), "v: %f");
+                    //isc = _mm256_add_epi32(isc, _mm256_set1_epi32(1));
+
+                    //debug_vector<uint32_t, __m256i>(_mm256_cvtps_epi32(sna_fpmask), "v: %d");
+
+                    /*
+                    DEBUG("----");
+                    debug_vector<float, __m256>(ds_vec, "ds %f");
+                    debug_vector<uint32_t, __m256i>((__m256i) srs_mask, "srs 0x%08x");
+                    debug_vector<float, __m256>(nearby_xs_vec, "near_x %f");
+                    debug_vector<float, __m256>(avg_x_vec, "avgx %f");
+                    DEBUG("----");
+                    */
+                    /*
+                    debug_vector<float, __m256>(_mm256_set1_ps(rules.sight_range_squared), "set %f");
+                    */
+
+
+                    //debug_vector<float, __m256>(ds_vec, "ds %f");
+                    //debug_vector<uint32_t, __m256i>((__m256i) srs_mask, "srs 0x%08x");
+                    //debug_vector<float, __m256>(sna_fpmask, "sna %f");
+
+                    //debug_vector<float, __m256>(sep_x_vec, "sep_x %f");
+                
+
+                }
+                
+                
+                ExtractVec<uint32_t, __m256i> extractor_i = {vector_sum(isc)};
+                in_sight_counter = extractor_i.data[0];
+                //if (!(extractor_i.data[0] == in_sight_counter)) DEBUG("%d, %d", extractor_i.data[0], in_sight_counter);
+
+                ExtractVec<float, __m256> extractor_f = {vector_sum(avg_vx_vec)};
+                //if (!(abs(avg_vx - extractor_f.data[0]) < 0.001)) DEBUG("%f %f %d", extractor_f.data[0], avg_vx, abs(avg_vx - extractor_f.data[0]) < 0.011);
+                avg_vx = extractor_f.data[0];
+                extractor_f.vector = vector_sum(avg_vy_vec);
+                avg_vy = extractor_f.data[0];
+
+                extractor_f.vector = vector_sum(avg_x_vec);
+                avg_x = extractor_f.data[0];
+                extractor_f.vector = vector_sum(avg_y_vec);
+                avg_y = extractor_f.data[0];
+
+                extractor_f.vector = vector_sum(sep_x_vec);
+                sep_x = extractor_f.data[0];
+                extractor_f.vector = vector_sum(sep_y_vec);
+                sep_y = extractor_f.data[0];
+
+                //TraceLog(LOG_DEBUG, TextFormat("vector saw: %d --- actual %d", isc_out.data[0], in_sight_counter));
+
+
+                //Avoidance
+                vxs[current_boid] += sep_x * rules.avoid_factor;
+                vys[current_boid] += sep_y * rules.avoid_factor;
+
+                //uint32_t mask = (in_sight_counter != 0) * 0xffff;
+
+                //When we are using SIMD we can use masks to avoid all the in sight counters
+                //Alignment
+                avg_vx = avg_vx/(in_sight_counter + (in_sight_counter == 0));
+                avg_vy = avg_vy/(in_sight_counter + (in_sight_counter == 0));
+
+                vxs[current_boid] += (in_sight_counter > 0) * (avg_vx - vxs[current_boid]) * rules.alignment_factor;
+                vys[current_boid] += (in_sight_counter > 0) * (avg_vy - vys[current_boid]) * rules.alignment_factor;
+
+                //Cohesion
+                avg_x = avg_x/(in_sight_counter + (in_sight_counter == 0));
+                avg_y = avg_y/(in_sight_counter + (in_sight_counter == 0));
+
+                vxs[current_boid] += (in_sight_counter > 0) * (avg_x - xs[current_boid]) * rules.cohesion_factor;
+                vys[current_boid] += (in_sight_counter > 0) * (avg_y - ys[current_boid]) * rules.cohesion_factor;
+            }
+        }        
+    }
+}
+
+void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
+    const auto xs = boid_list.m_boid_store->xs;
+    const auto ys = boid_list.m_boid_store->ys;
+    const auto vxs = boid_list.m_boid_store->vxs;
+    const auto vys = boid_list.m_boid_store->vys;
+    const auto homes = boid_list.m_boid_store->homes;
+
+    const auto world_height = boid_map.m_cell_size * boid_map.m_ysize;
+    const auto world_width = boid_map.m_cell_size * boid_map.m_xsize;
+
+    for (int i = 0; i < boid_list.m_size; i++) {
+        Boid boid = i;   
+        
+        //Window edges, todo replace with old function
+        if (xs[boid] > (world_width - rules.edge_width)) {
+            vxs[boid] -= rules.edge_factor;
         }
+        if (xs[boid] < rules.edge_width) {
+            vxs[boid] += rules.edge_factor;
+        } 
+        if (ys[boid] > (world_height - rules.edge_width)) {
+            vys[boid] -= rules.edge_factor;
+        } 
+        if (ys[boid] < rules.edge_width) {
+            vys[boid] += rules.edge_factor;
+        } 
 
-        /*
-        if ((rules.show_lines || (current_boid == selected_boid)) && current_boid->next != nullptr) {
-            DrawLine(current_boid->x, current_boid->y, current_boid->next->x, current_boid->next->y, BLUE);
+
+        //Apply some randomness
+        float rx = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
+        float ry = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
+
+        vxs[boid] += rx * rules.rand;
+        vys[boid] += ry * rules.rand;
+
+
+        //Apply homing
+        int hy = homes[boid] / 16;
+        int hx = homes[boid] % 16;
+
+        float px = hx * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
+        float py = hy * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
+
+
+        float dx = px - xs[boid];
+        float dy = py - ys[boid];
+
+        vxs[boid] += dx * rules.homing;
+        vys[boid] += dy * rules.homing;
+
+        float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
+
+        if (speed > 0)
+        {
+            float ispeed = 1.0f/speed;
+            vxs[boid] = vxs[boid]*ispeed * 3;
+            vys[boid] = vys[boid]*ispeed * 3;
         }
         
-        if (current_boid == selected_boid) TraceLog(LOG_DEBUG, TextFormat("FORCES: SEP: [%f, %f], ALIGN: [%f, %f], COHESION: [%f, %f]", sep_x * rules.avoid_factor, sep_y * rules.avoid_factor, (avg_vx - current_boid->vx) * rules.alignment_factor, (avg_vy - current_boid->vy) * rules.alignment_factor, (avg_x - current_boid->x) * rules.cohesion_factor, (avg_y - current_boid->y) * rules.cohesion_factor));
-        */
-        current_boid = boid_list.m_boid_store->index_next[current_boid];
+        xs[boid] += vxs[boid];
+        ys[boid] += vys[boid];
     }
-    //delete[] test;
 }
 
-/*
-void push_boids(const BoidList& boids) {
-    for (int i = 0; i < boids.m_size; i++) {
-        boids.m_boid_buffer[i].x += boids.m_boid_buffer[i].vx;
-        boids.m_boid_buffer[i].y += boids.m_boid_buffer[i].vy;
+void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    for (int y = 0; y < boid_map.m_ysize; y++) {
+        for (int x = 0; x < boid_map.m_xsize; x++) {
+            update_cell(boid_map, x, y, rules, selected_boid, boid_list);
+        }
     }
+
+    auto t_mid = std::chrono::high_resolution_clock::now();
+
+    update_non_interacting(boid_map, rules, boid_list);
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+
+    TraceLog(LOG_DEBUG, TextFormat("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count()));
 }
-*/
 
 void UpdateRulesWindow(Rules &rules) {
         ImGui::Begin("Boids Settings");
@@ -414,6 +658,7 @@ int main () {
     Rules rules;
     PerfMonitor perf_monitor;    
 
+    myfile.open("log.log");
 
     int world_width = screen_width * 8;
     int world_height = screen_height * 8;
@@ -430,10 +675,6 @@ int main () {
     std::default_random_engine generator;
     std::uniform_real_distribution<float> width_distribution (rules.edge_width, world_width - rules.edge_width);
     std::uniform_real_distribution<float> height_distribution (rules.edge_width, world_height - rules.edge_width);
-
-    //std::uniform_real_distribution<float> distribution(rules.edge_width, world_width - rules.edge_width);
-
-    //std::uniform_real_distribution<float>
 
     //Populate some test boids
     for (int i = 0; i < boid_list.m_size; i++) {
@@ -455,7 +696,6 @@ int main () {
     auto homes = boid_list.m_boid_store->homes;
     auto index_nexts = boid_list.m_boid_store->index_next;
 
-
     rlImGuiSetup(true);
     
 
@@ -465,7 +705,7 @@ int main () {
     while (WindowShouldClose() == false){
 
         populate_map(boid_list, boid_map);
-        rebuild_list(boid_list, boid_map);
+        selected_boid = rebuild_list(boid_list, boid_map, selected_boid);
 
         xs = boid_list.m_boid_store->xs;
         ys = boid_list.m_boid_store->ys;
@@ -517,85 +757,20 @@ int main () {
                 selected_boid = nearest;
             }
 
-            auto t_start = std::chrono::high_resolution_clock::now();
-            for (int y = 0; y < boid_map.m_ysize; y++) {
-                for (int x = 0; x < boid_map.m_xsize; x++) {
-                    do_something_to_cell(boid_map, x, y, rules, selected_boid, boid_list);
-                }
-            }
-            auto t_end = std::chrono::high_resolution_clock::now();
+            update_boids(boid_map, rules, selected_boid, boid_list);
+           
             //TraceLog(LOG_DEBUG, TextFormat("%0.12f", std::chrono::duration<double, std::milli>(t_end-t_start).count()));
 
-            //This should be easy to be simple to vectorize
-            for (int i = 0; i < boid_list.m_size; i++) {
-                Boid boid = i;   
-                
-                //Window edges, todo replace with old function
-                if (xs[boid] > (world_width - rules.edge_width)) {
-                    vxs[boid] -= rules.edge_factor;
-                }
-                if (xs[boid] < rules.edge_width) {
-                    vxs[boid] += rules.edge_factor;
-                } 
-                if (ys[boid] > (world_height - rules.edge_width)) {
-                    vys[boid] -= rules.edge_factor;
-                } 
-                if (ys[boid] < rules.edge_width) {
-                    vys[boid] += rules.edge_factor;
-                } 
 
-
-                //Apply some randomness
-                float rx = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
-                float ry = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
-
-                vxs[boid] += rx * rules.rand;
-                vys[boid] += ry * rules.rand;
-
-
-                //Apply homing
-                int hy = homes[boid] / 16;
-                int hx = homes[boid] % 16;
-
-                float px = hx * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
-                float py = hy * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
-
-
-                float dx = px - xs[boid];
-                float dy = py - ys[boid];
-
-                vxs[boid] += dx * rules.homing;
-                vys[boid] += dy * rules.homing;
-
-                float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
-
-                if (speed > 0)
-                {
-                    float ispeed = 1.0f/speed;
-                    vxs[boid] = vxs[boid]*ispeed * 3;
-                    vys[boid] = vys[boid]*ispeed * 3;
-                }
-                
-                xs[boid] += vxs[boid];
-                ys[boid] += vys[boid];
-            }
-
-            Vector2 ball_pos2 {0, 0};
-
-            Vector2 v1 {0.f, 2 * TRIANGLE_SIZE};
-            Vector2 v2 {-TRIANGLE_SIZE, -2 * TRIANGLE_SIZE};
-            Vector2 v3 {TRIANGLE_SIZE, -2 * TRIANGLE_SIZE};
-
-            
             for (int i = 0; i < boid_list.m_size; i++) {
                 rlPushMatrix();
                     rlTranslatef(xs[i], ys[i], 0);
                     float angle = (atan2(vxs[i], vys[i]) * 360.) / (2 * PI);
                     rlRotatef(angle, 0, 0, -1);
-                    DrawTriangle(v3, v2, v1, WHITE);
+                    DrawTriangle(triangle[2], triangle[1], triangle[0], WHITE);
                 rlPopMatrix();
             }
-
+            
             
             auto trav = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
             while (trav != -1) {
@@ -603,11 +778,12 @@ int main () {
                     rlTranslatef(xs[trav], ys[trav], 0);
                     float angle = (atan2(vxs[trav], vys[trav]) * 360.) / (2 * PI);
                     rlRotatef(angle, 0, 0, -1);
-                    DrawTriangle(v3, v2, v1, BLUE);
+                    DrawTriangle(triangle[2], triangle[1], triangle[0], BLUE);
                 rlPopMatrix();
 
                 trav = index_nexts[trav];
             }
+
             /*
             //Highlight selected boid
             if (selected_boid != nullptr) {
