@@ -22,7 +22,7 @@
 std::ofstream myfile;
 
 const float TRIANGLE_SIZE = 5.f;
-const uint32_t NUM_BOIDS = 100000;
+const uint32_t NUM_BOIDS = 200000;
 const uint16_t SIGHT_RANGE = 100;
 
 #define WORLD_SIZE_MULT 10
@@ -73,6 +73,9 @@ struct PerfMonitor {
     float tps;
     float rolling_average;
 } typedef PerfMonitor;
+
+void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
+
 
 void free_boidstore_members(BoidStore *boid_store) {
     free(boid_store->index_next);
@@ -293,21 +296,37 @@ static Mesh GenMeshCustom(void)
     mesh.triangleCount = 1;
     mesh.vertexCount = mesh.triangleCount*3;
     mesh.vertices = (float *)MemAlloc(mesh.vertexCount*3*sizeof(float));    // 3 vertices, 3 coordinates each (x, y, z)
-
+    mesh.colors = (unsigned char *)MemAlloc(mesh.vertexCount*4*sizeof(unsigned char)); 
+    
     // Vertex at (0, 0, 0)
     mesh.vertices[0] = -TRIANGLE_SIZE;
-    mesh.vertices[1] = 0;
+    mesh.vertices[1] = 0.;
     mesh.vertices[2] = -2 * TRIANGLE_SIZE;
 
     // Vertex at (1, 0, 2)
-    mesh.vertices[3] = 0;
-    mesh.vertices[4] = 0;
+    mesh.vertices[3] = 0.;
+    mesh.vertices[4] = 0.;
     mesh.vertices[5] = 2 * TRIANGLE_SIZE;
 
     // Vertex at (2, 0, 0)
     mesh.vertices[6] = TRIANGLE_SIZE;
-    mesh.vertices[7] = 0;
+    mesh.vertices[7] = 0.;
     mesh.vertices[8] = -2 * TRIANGLE_SIZE;
+
+    mesh.colors[0] = 255;
+    mesh.colors[1] = 0;
+    mesh.colors[2] = 0;
+    mesh.colors[3] = 255;
+    
+    mesh.colors[4] = 0;
+    mesh.colors[5] = 255;
+    mesh.colors[6] = 0;
+    mesh.colors[7] = 255;
+
+    mesh.colors[8] = 0;
+    mesh.colors[9] = 0;
+    mesh.colors[10] = 255;
+    mesh.colors[11] = 255;
 
     // Upload mesh data from CPU (RAM) to GPU (VRAM) memory
     UploadMesh(&mesh, false);
@@ -482,41 +501,47 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
     }
 }
 
-inline Matrix YAxisRotate(float angle) {
-    Matrix result = { 0 };
-
-    const float x = 0, y = 1, z = 0;
-
-    const float lengthSquared = 1;
-
-    const float sinres = sinf(angle);
-    const float cosres = cosf(angle);
-    const float t = 1.0f - cosres;
-
-    result.m0 = cosres;
-    result.m1 = 0.0f;
-    result.m2 = -sinres;
-    result.m3 = 0.0f;
-
-    result.m4 = 0.0f;
-    result.m5 = 1.0f;
-    result.m6 = 0.0f;
-    result.m7 = 0.0f;
-
-    result.m8 = sinres;
-    result.m9 = 0.0f;
-    result.m10 = cosres;
-    result.m11 = 0.0f;
-
-    result.m12 = 0.0f;
-    result.m13 = 0.0f;
-    result.m14 = 0.0f;
-    result.m15 = 1.0f;
-
-    return result;
+void debug_matrix(Matrix matrix) {
+    float16 matrix2 = MatrixToFloatV(matrix);
+    DEBUG("Begin matrix")
+    for (int i = 0; i < 4; i++) {
+        DEBUG("%f, %f, %f, %f", matrix2.v[i],matrix2.v[i+4],matrix2.v[i+8],matrix2.v[i+12]);
+    } 
+    DEBUG("End matrix")
 }
 
-void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list, Matrix* transforms) {
+inline Matrix YAxisRotate(float angle) {
+    const float sinres = sinf(angle);
+    const float cosres = cosf(angle);
+
+    //DEBUG("sinres = %f", sinres);
+
+    Matrix res = {
+        cosres, 0.0, sinres, 0.0,
+        0.0,    1.0, 0.0,     0.0,
+        -sinres, 0.0, cosres,  0.0,
+        0.0,    0.0, 0.0,     1.0,
+    };
+    
+    return res;
+}
+
+
+inline Matrix YAxisRotateAndTranslate(float angle, float x, float y, float z) {
+    const float sinres = sinf(angle);
+    const float cosres = cosf(angle);
+
+    Matrix res = {
+        cosres,     0.0, sinres,    x,
+        0.0,        1.0, 0.0,       y,
+        -sinres,    0.0, cosres,    z,
+        0,          0.0, 0,         1.0,
+    };
+
+    return res;
+}
+
+void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
     const auto xs = boid_list.m_boid_store->xs;
     const auto ys = boid_list.m_boid_store->ys;
     const auto vxs = boid_list.m_boid_store->vxs;
@@ -526,9 +551,11 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
     const auto world_height = boid_map.m_cell_size * boid_map.m_ysize;
     const auto world_width = boid_map.m_cell_size * boid_map.m_xsize;
 
-    for (int i = 0; i < boid_list.m_size; i++) {
-        Boid boid = i;   
-        
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+
+    //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
+    for (Boid boid = 0; boid < boid_list.m_size; boid++) {       
         //Window edges, todo replace with old function
         if (xs[boid] > (world_width - rules.edge_width)) {
             vxs[boid] -= rules.edge_factor;
@@ -572,23 +599,12 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
         vxs[boid] = vxs[boid]*ispeed * 3;
         vys[boid] = vys[boid]*ispeed * 3;
         
-        
         xs[boid] += vxs[boid];
-        ys[boid] += vys[boid];
-
-        //TODO optimize this -- currently very expensive
-        //In current form doesn't lend itself to SIMD
-        Matrix translation = MatrixTranslate(xs[boid], 0., ys[boid]);
-        Vector3 axis = (Vector3){ 0., 1., 0.};
-        float angle = (atan2(vxs[i], vys[i]));
-        Matrix rotation = YAxisRotate(angle);
-        
-        transforms[i] = MatrixMultiply(rotation, translation);
-        
+        ys[boid] += vys[boid];        
     }
 }
 
-void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boid, const BoidList& boid_list, Matrix* transforms) {
+void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
     auto t_start = std::chrono::high_resolution_clock::now();
 
     for (int y = 0; y < boid_map.m_ysize; y++) {
@@ -599,7 +615,7 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boi
 
     auto t_mid = std::chrono::high_resolution_clock::now();
 
-    update_non_interacting(boid_map, rules, boid_list, transforms);
+    update_non_interacting(boid_map, rules, boid_list);
 
     auto t_end = std::chrono::high_resolution_clock::now();
 
@@ -669,20 +685,28 @@ int main () {
     std::time_t result = std::time(nullptr);
     TraceLog(LOG_DEBUG, TextFormat("Time is: %s", std::asctime(std::localtime(&result)) ));
 
-   
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
 
     Mesh tri = GenMeshCustom();
-    Matrix *transforms = (Matrix *)RL_CALLOC(NUM_BOIDS, sizeof(Matrix));
 
-    Shader shader = LoadShader(TextFormat("resources/shaders/glsl%i/lighting_instancing.vs", 330),
+    Shader boid_shader = LoadShader(TextFormat("resources/shaders/glsl%i/lighting_instancing.vs", 330),
                                TextFormat("resources/shaders/glsl%i/lighting.fs", 330));
 
-    shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(shader, "viewPos");
-    shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(shader, "instanceTransform");
+    boid_shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(boid_shader, "viewPos");
+    boid_shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(boid_shader, "instanceTransform");
+
+    boid_shader.locs[26] = GetShaderLocationAttrib(boid_shader, "boid_x");
+    boid_shader.locs[27] = GetShaderLocationAttrib(boid_shader, "boid_y");
+    boid_shader.locs[28] = GetShaderLocationAttrib(boid_shader, "boid_vx");
+    boid_shader.locs[29] = GetShaderLocationAttrib(boid_shader, "boid_vy");
+
+    DEBUG("boid_x at: %d", boid_shader.locs[26]);
+    DEBUG("viewPos at: %d", boid_shader.locs[SHADER_LOC_VECTOR_VIEW]);
+    DEBUG("instanceTransform at: %d", boid_shader.locs[SHADER_LOC_MATRIX_MODEL]);
 
     Material matInstances = LoadMaterialDefault();
-    matInstances.shader = shader;
-    matInstances.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    matInstances.shader = boid_shader;
+    matInstances.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
     BoidList boid_list(NUM_BOIDS);
 
@@ -738,17 +762,6 @@ int main () {
 
     rlImGuiSetup(true);
     
-    /*
-    for (int i = 0; i < NUM_BOIDS; i++)
-    {   
-        Matrix translation = MatrixTranslate((float)GetRandomValue(-(2560/2), (2560/2)), 0., (float)GetRandomValue(-(1440/2), (1440/2)));
-        Vector3 axis = Vector3Normalize((Vector3){ 0., 1., 0. });
-        float angle = (float)GetRandomValue(0, 10)*DEG2RAD;
-        Matrix rotation = MatrixRotate(axis, angle);
-        transforms[i] = MatrixMultiply(rotation, translation);
-    }
-    */
-
     Boid selected_boid = -1;
     bool rebuild_scheduled = false;
 
@@ -764,10 +777,9 @@ int main () {
         index_nexts = boid_list.m_boid_store->index_next;
 
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
-        SetShaderValue(shader, shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
- 
-        update_boids(boid_map, rules, selected_boid, boid_list, transforms);
+        SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
 
+        update_boids(boid_map, rules, selected_boid, boid_list);
 
 
         //TODO move camera stuff to class
@@ -828,12 +840,18 @@ int main () {
         BeginDrawing();
             ClearBackground(BLACK);
 
+            auto t_start_3d = std::chrono::high_resolution_clock::now();
+
             BeginMode3D(camera);
-                DrawMeshInstanced(tri, matInstances, transforms, NUM_BOIDS);
+                DrawMeshInstanced2(tri, matInstances, NUM_BOIDS, boid_list.m_boid_store->xs, boid_list.m_boid_store->ys, boid_list.m_boid_store->vxs, boid_list.m_boid_store->vys);
             EndMode3D();
 
+            auto t_end_3d = std::chrono::high_resolution_clock::now();
+
+            //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
+
             BeginMode2D(cam);
-                /*
+                /* 2d render mode code
                 for (int i = 0; i < boid_list.m_size; i++) {
                     rlPushMatrix();
                         rlTranslatef(xs[i], ys[i], 0);
@@ -881,4 +899,125 @@ int main () {
 
     CloseWindow();
     return 0;
+}
+
+
+// Modified version of DrawMeshInstanced from the raylib module "rmodels.c"
+void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy)
+{
+#if defined(GRAPHICS_API_OPENGL_33) || defined(GRAPHICS_API_OPENGL_ES2)
+    #define MAX_MATERIAL_MAPS 12
+    #define MAX_MESH_VERTEX_BUFFERS 7
+
+    // Instancing required variables
+    unsigned int instances_boid_x_ID, instances_boid_y_ID, instances_boid_vx_ID, instances_boid_vy_ID;
+
+    // Bind shader program
+    rlEnableShader(material.shader.id);
+
+    // Send required data to shader (matrices, values)
+    //-----------------------------------------------------
+    // Upload to shader material.colDiffuse
+    if (material.shader.locs[SHADER_LOC_COLOR_DIFFUSE] != -1)
+    {
+        float values[4] = {
+            (float)material.maps[MATERIAL_MAP_DIFFUSE].color.r/255.0f,
+            (float)material.maps[MATERIAL_MAP_DIFFUSE].color.g/255.0f,
+            (float)material.maps[MATERIAL_MAP_DIFFUSE].color.b/255.0f,
+            (float)material.maps[MATERIAL_MAP_DIFFUSE].color.a/255.0f
+        };
+
+        rlSetUniform(material.shader.locs[SHADER_LOC_COLOR_DIFFUSE], values, SHADER_UNIFORM_VEC4, 1);
+    }
+
+    // Get a copy of current matrices to work with,
+    // just in case stereo render is required, and we need to modify them
+    // NOTE: At this point the modelview matrix just contains the view matrix (camera)
+    // That's because BeginMode3D() sets it and there is no model-drawing function
+    // that modifies it, all use rlPushMatrix() and rlPopMatrix()
+    Matrix matModel = MatrixIdentity();
+    Matrix matView = rlGetMatrixModelview();
+    Matrix matModelView = MatrixIdentity();
+    Matrix matProjection = rlGetMatrixProjection();
+
+    // Upload view and projection matrices (if locations available)
+    if (material.shader.locs[SHADER_LOC_MATRIX_VIEW] != -1) rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_VIEW], matView);
+    if (material.shader.locs[SHADER_LOC_MATRIX_PROJECTION] != -1) rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
+
+    // Enable mesh VAO to attach new buffer
+    rlEnableVertexArray(mesh.vaoId);
+
+    instances_boid_x_ID = rlLoadVertexBuffer(boid_x, instances*sizeof(float), false);
+    rlEnableVertexAttribute(material.shader.locs[26]);
+    rlSetVertexAttribute(material.shader.locs[26], 1, RL_FLOAT, false, sizeof(float), 0);
+    rlSetVertexAttributeDivisor(material.shader.locs[26], 1);
+
+    instances_boid_y_ID = rlLoadVertexBuffer(boid_y, instances*sizeof(float), false);
+    rlEnableVertexAttribute(material.shader.locs[27]);
+    rlSetVertexAttribute(material.shader.locs[27], 1, RL_FLOAT, false, sizeof(float), 0);
+    rlSetVertexAttributeDivisor(material.shader.locs[27], 1);
+
+    instances_boid_vx_ID = rlLoadVertexBuffer(boid_vx, instances*sizeof(float), false);
+    rlEnableVertexAttribute(material.shader.locs[28]);
+    rlSetVertexAttribute(material.shader.locs[28], 1, RL_FLOAT, false, sizeof(float), 0);
+    rlSetVertexAttributeDivisor(material.shader.locs[28], 1);
+
+    instances_boid_vy_ID = rlLoadVertexBuffer(boid_vy, instances*sizeof(float), false);
+    rlEnableVertexAttribute(material.shader.locs[29]);
+    rlSetVertexAttribute(material.shader.locs[29], 1, RL_FLOAT, false, sizeof(float), 0);
+    rlSetVertexAttributeDivisor(material.shader.locs[29], 1);
+    
+
+    rlDisableVertexBuffer();
+    rlDisableVertexArray();
+
+
+    // Accumulate internal matrix transform (push/pop) and view matrix
+    // NOTE: In this case, model instance transformation must be computed in the shader
+    matModelView = MatrixMultiply(rlGetMatrixTransform(), matView);
+
+
+    // Try binding vertex array objects (VAO)
+    rlEnableVertexArray(mesh.vaoId);
+       
+    // Calculate model-view-projection matrix (MVP)
+    Matrix matModelViewProjection = MatrixMultiply(matModelView, matProjection);
+    
+    // Send combined model-view-projection matrix to shader
+    rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_MVP], matModelViewProjection);
+
+    // Draw mesh instanced
+    rlDrawVertexArrayInstanced(0, mesh.vertexCount, instances);
+    
+    // Unbind all bound texture maps
+    for (int i = 0; i < MAX_MATERIAL_MAPS; i++)
+    {
+        if (material.maps[i].texture.id > 0)
+        {
+            //DEBUG("UNBINDING TEXTURE")
+            // Select current shader texture slot
+            rlActiveTextureSlot(i);
+
+            // Disable texture for active slot
+            if ((i == MATERIAL_MAP_IRRADIANCE) ||
+                (i == MATERIAL_MAP_PREFILTER) ||
+                (i == MATERIAL_MAP_CUBEMAP)) rlDisableTextureCubemap();
+            else rlDisableTexture();
+        }
+    }
+    
+    // Disable all possible vertex array objects (or VBOs)
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    rlDisableVertexBufferElement();
+
+    // Disable shader program
+    rlDisableShader();
+
+    // Remove instance transforms buffer
+    rlUnloadVertexBuffer(instances_boid_x_ID);
+    rlUnloadVertexBuffer(instances_boid_y_ID);
+    rlUnloadVertexBuffer(instances_boid_vx_ID);
+    rlUnloadVertexBuffer(instances_boid_vy_ID);
+#endif
 }
