@@ -35,10 +35,10 @@ void main() {
     
     // Send vertex attributes to fragment shader
     fragPosition = vec3(mvpi*vec4(vertexPosition, 1.0));
-    fragColor = vertexColor;
+    //fragColor = vertexColor;
 
-    fragColor = vec4(boid_x/(2560*8), boid_y/(2560*8), 1.0, 1.0);
-    //fragColor = vec4((boid_vx+3)/6, boid_vy+3/6, 0.5, 1.0);
+    //fragColor = vec4(boid_x/(2560*8), boid_y/(2560*8), 1.0, 1.0);
+    fragColor = vec4((boid_vx+3)/6, boid_vy+3/6, 0.5, 1.0);
 
     //fragColor = vec4(0.5, 1.0, 1.0, 1.0);
 

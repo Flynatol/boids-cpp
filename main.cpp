@@ -16,15 +16,15 @@
 #include "imgui.h"
 
 #define NO_FONT_AWESOME
-
 #include <rlImGui.h>
 
 std::ofstream myfile;
 
 const float TRIANGLE_SIZE = 5.f;
-const uint32_t NUM_BOIDS = 200000;
+const uint32_t NUM_BOIDS = 100000;
 const uint16_t SIGHT_RANGE = 100;
 
+#define FRAME_RATE_LIMIT 165
 #define WORLD_SIZE_MULT 10
 
 static const Vector2 triangle[3] = {
@@ -101,9 +101,9 @@ BoidStore* new_boidstore(int to_alloc) {
 
 class BoidList {
     public:
-        BoidStore *m_boid_store;
-        BoidStore *m_backbuffer; //We're going to use a back buffer as we would need to have double the
-                                 //memory allocated at some point and this reduces calls to malloc.
+        BoidStore *m_boid_store; //We're going to use a back buffer as we would need to have double the
+        BoidStore *m_backbuffer; //memory allocated at some point and this reduces calls to malloc.
+                                 
         int m_size;
 
     public:
@@ -384,12 +384,10 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                 __m256i isc = _mm256_set1_epi32(0);
 
                 __m256i read_mask;
-                __m256i read_mask_rev;
-
                 
+                /*
                 //Check against each boid in the row currently being processed
                 for (Boid nearby_boid = row_end; nearby_boid < row_end; nearby_boid++) {
-                    int bytes_left = row_end - nearby_boid; 
 
                     int_fast32_t dist_squared = (xs[current_boid] - xs[nearby_boid]) * (xs[current_boid] - xs[nearby_boid]) + (ys[current_boid] - ys[nearby_boid]) * (ys[current_boid] - ys[nearby_boid]);
 
@@ -410,7 +408,7 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
 
                     in_sight_counter += in_sight_but_not_avoid;
                 }
-                
+                */
 
                 for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
                     int bytes_left = row_end - nearby_boid; 
@@ -453,7 +451,6 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
 
                     isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
                 }
-                
                 
                 ExtractVec<uint32_t, __m256i> extractor_i = {vector_sum(isc)};
                 in_sight_counter = extractor_i.data[0];
@@ -553,40 +550,32 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
-
-    //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
-    for (Boid boid = 0; boid < boid_list.m_size; boid++) {       
-        //Window edges, todo replace with old function
-        if (xs[boid] > (world_width - rules.edge_width)) {
-            vxs[boid] -= rules.edge_factor;
-        }
-        if (xs[boid] < rules.edge_width) {
-            vxs[boid] += rules.edge_factor;
-        } 
-        if (ys[boid] > (world_height - rules.edge_width)) {
-            vys[boid] -= rules.edge_factor;
-        } 
-        if (ys[boid] < rules.edge_width) {
-            vys[boid] += rules.edge_factor;
-        } 
-
+    //Moving rand to it's own loop to avoid having to vectorize rand for now. (Might disable rand)
+    for (Boid boid = 0; boid < boid_list.m_size; boid++) { 
         //Apply some randomness
         float rx = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
         float ry = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
 
         vxs[boid] += rx * rules.rand;
         vys[boid] += ry * rules.rand;
+    } 
+
+
+    //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
+    for (Boid boid = 0; boid < boid_list.m_size; boid++) {       
+        //Window edges
+        vxs[boid] = vxs[boid] + rules.edge_factor * ((xs[boid] < rules.edge_width) - (xs[boid] > (world_width - rules.edge_width)));
+        vys[boid] = vys[boid] + rules.edge_factor * ((ys[boid] < rules.edge_width) - (ys[boid] > (world_height - rules.edge_width)));
 
         //Apply homing
-        int hy = homes[boid] / 16;
-        int hx = homes[boid] % 16;
+        int home_index_y = homes[boid] / 16;
+        int home_index_x = homes[boid] % 16;
 
-        float px = hx * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
-        float py = hy * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
+        float home_loc_x = home_index_x * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
+        float home_loc_y = home_index_y * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
 
-
-        float dx = px - xs[boid];
-        float dy = py - ys[boid];
+        float dx = home_loc_x - xs[boid];
+        float dy = home_loc_y - ys[boid];
 
         vxs[boid] += dx * rules.homing;
         vys[boid] += dy * rules.homing;
@@ -595,13 +584,84 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
 
         speed = speed + (!speed);
 
-        float ispeed = 1.0f/speed;
-        vxs[boid] = vxs[boid]*ispeed * 3;
-        vys[boid] = vys[boid]*ispeed * 3;
+        float ispeed = 3.0f/speed;
+        vxs[boid] = vxs[boid]*ispeed;
+        vys[boid] = vys[boid]*ispeed;
+
+        //if (boid < 8) DEBUG("xs[b]: %f", ys[boid] + vys[boid]*ispeed);
         
         xs[boid] += vxs[boid];
         ys[boid] += vys[boid];        
     }
+
+    
+    /*
+    Inital profiling on SIMD for this showed negligible results.
+
+    const auto rf = _mm256_set1_ps(rules.edge_factor);
+    const auto ew = _mm256_set1_ps(rules.edge_width);
+    const auto wh = _mm256_set1_ps(world_height);
+    const auto ww = _mm256_set1_ps(world_width);
+
+    for (Boid boid = boid_list.m_size; boid < boid_list.m_size; boid += 8) { 
+        const auto xs_vec = _mm256_load_ps(&xs[boid]);
+        const auto ys_vec = _mm256_load_ps(&ys[boid]);
+
+        auto vxs_vec = _mm256_load_ps(&vxs[boid]);
+        auto vys_vec = _mm256_load_ps(&vys[boid]);
+
+        auto cmpx_1 = _mm256_cmp_ps(xs_vec, ew, _CMP_LT_OS);
+        auto cmpx_2 = _mm256_cmp_ps(xs_vec, _mm256_sub_ps(ww, - ew), _CMP_GT_OS);
+        auto cmpy_1 = _mm256_cmp_ps(ys_vec, ew, _CMP_LT_OS);
+        auto cmpy_2 = _mm256_cmp_ps(ys_vec, _mm256_sub_ps(wh, - ew), _CMP_GT_OS);
+
+        vxs_vec = _mm256_add_ps(vxs_vec, _mm256_sub_ps(_mm256_and_ps(cmpx_1, rf), _mm256_and_ps(cmpx_2, rf)));
+        vys_vec = _mm256_add_ps(vys_vec, _mm256_sub_ps(_mm256_and_ps(cmpy_1, rf), _mm256_and_ps(cmpy_2, rf)));
+
+        
+        //Apply homing
+        int home_index_y = homes[boid] / 16;
+        int home_index_x = homes[boid] % 16;
+
+        float home_loc_x = home_index_x * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
+        float home_loc_y = home_index_y * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
+
+
+        float dx = home_loc_x - xs[boid];
+        float dy = home_loc_y - ys[boid];
+
+        vxs[boid] += dx * rules.homing;
+        vys[boid] += dy * rules.homing;
+
+        float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
+
+        
+        speed = speed + (!speed);
+
+        float ispeed = 3.0f/speed;
+        vxs[boid] = vxs[boid]*ispeed;
+        vys[boid] = vys[boid]*ispeed;
+        
+        xs[boid] += vxs[boid];
+        ys[boid] += vys[boid];
+        
+
+        const auto threes = _mm256_set1_ps(3.0);
+
+        const auto rspeed_vec =  _mm256_rsqrt_ps(_mm256_add_ps(_mm256_mul_ps(vxs_vec, vxs_vec),_mm256_mul_ps(vys_vec, vys_vec)));
+        const auto ispeed_vec = _mm256_mul_ps(threes, rspeed_vec);
+
+        vxs_vec = _mm256_mul_ps(vxs_vec, ispeed_vec);
+        vys_vec = _mm256_mul_ps(vys_vec, ispeed_vec);
+
+        //if (boid == 0) debug_vector<float>(_mm256_add_ps(ys_vec, vys_vec), "%f");
+        _mm256_store_ps(&xs[boid], _mm256_add_ps(xs_vec, vxs_vec));
+        _mm256_store_ps(&ys[boid], _mm256_add_ps(ys_vec, vys_vec));  
+
+        _mm256_store_ps(&vxs[boid], vxs_vec);
+        _mm256_store_ps(&vys[boid], vys_vec);  
+    }
+    */
 }
 
 void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
@@ -677,7 +737,7 @@ void UpdateCameraWindow2d(Camera2D *cam) {
 
 int main () {
     InitWindow(screen_width, screen_height, "RayLib Boids!");
-    SetTargetFPS(165);
+    SetTargetFPS(FRAME_RATE_LIMIT);
 
     SetTraceLogLevel(LOG_ALL);
     TraceLog(LOG_DEBUG, TextFormat("Boid size is: %d bytes", sizeof(Boid)));
@@ -685,12 +745,12 @@ int main () {
     std::time_t result = std::time(nullptr);
     TraceLog(LOG_DEBUG, TextFormat("Time is: %s", std::asctime(std::localtime(&result)) ));
 
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    //SetConfigFlags(FLAG_MSAA_4X_HINT);
 
     Mesh tri = GenMeshCustom();
 
-    Shader boid_shader = LoadShader(TextFormat("resources/shaders/glsl%i/lighting_instancing.vs", 330),
-                               TextFormat("resources/shaders/glsl%i/lighting.fs", 330));
+    Shader boid_shader = LoadShader(TextFormat("resources/shaders/glsl%i/directional.vs", 330),
+                                    TextFormat("resources/shaders/glsl%i/simple.fs", 330));
 
     boid_shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(boid_shader, "viewPos");
     boid_shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(boid_shader, "instanceTransform");
@@ -903,6 +963,8 @@ int main () {
 
 
 // Modified version of DrawMeshInstanced from the raylib module "rmodels.c"
+// My modifications bind the x, y, vx, and vy of each boids as vertex attributes
+// We can then use these to generate the transformation matricies on the GPU instead.
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy)
 {
 #if defined(GRAPHICS_API_OPENGL_33) || defined(GRAPHICS_API_OPENGL_ES2)
@@ -935,7 +997,6 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     // NOTE: At this point the modelview matrix just contains the view matrix (camera)
     // That's because BeginMode3D() sets it and there is no model-drawing function
     // that modifies it, all use rlPushMatrix() and rlPopMatrix()
-    Matrix matModel = MatrixIdentity();
     Matrix matView = rlGetMatrixModelview();
     Matrix matModelView = MatrixIdentity();
     Matrix matProjection = rlGetMatrixProjection();
@@ -967,15 +1028,12 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     rlSetVertexAttribute(material.shader.locs[29], 1, RL_FLOAT, false, sizeof(float), 0);
     rlSetVertexAttributeDivisor(material.shader.locs[29], 1);
     
-
     rlDisableVertexBuffer();
     rlDisableVertexArray();
-
 
     // Accumulate internal matrix transform (push/pop) and view matrix
     // NOTE: In this case, model instance transformation must be computed in the shader
     matModelView = MatrixMultiply(rlGetMatrixTransform(), matView);
-
 
     // Try binding vertex array objects (VAO)
     rlEnableVertexArray(mesh.vaoId);
