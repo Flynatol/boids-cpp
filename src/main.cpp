@@ -17,6 +17,7 @@
 
 #define NO_FONT_AWESOME
 #include <rlImGui.h>
+#include "boidlist.h"
 
 std::ofstream myfile;
 
@@ -36,16 +37,6 @@ static const Vector2 triangle[3] = {
 //#define DEBUG(...) myfile << TextFormat(__VA_ARGS__) << '\n';
 //#define DEBUG(...) ;
 #define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
-
-struct BoidStore {
-    float *xs;            
-    float *ys;            
-    float *vxs;          
-    float *vys;
-    int32_t *index_next;  
-    int32_t *homes;       
-    int32_t *depth;                 
-} typedef BoidStore;
 
 typedef int32_t Boid;
 
@@ -75,67 +66,6 @@ struct PerfMonitor {
 } typedef PerfMonitor;
 
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
-
-
-void free_boidstore_members(BoidStore *boid_store) {
-    free(boid_store->index_next);
-    free(boid_store->xs);
-    free(boid_store->ys);
-    free(boid_store->vxs);
-    free(boid_store->vys);
-    free(boid_store->homes);
-    free(boid_store->depth);
-}
-
-BoidStore* new_boidstore(int to_alloc) {
-    return new BoidStore {
-        .xs = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
-        .ys = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
-        .vxs = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
-        .vys = (float *) _aligned_malloc(to_alloc * sizeof(float), 64),
-        .index_next = (int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64),
-        .homes = (int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64),
-        .depth = (int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64),
-    };
-}
-
-class BoidList {
-    public:
-        BoidStore *m_boid_store; //We're going to use a back buffer as we would need to have double the
-        BoidStore *m_backbuffer; //memory allocated at some point and this reduces calls to malloc.
-                                 
-        int m_size;
-
-    public:
-        BoidList() = delete;
-        BoidList(int size) { 
-            //We need to round up the amount of memory we are allocating as 
-            //we will be reading these as blocks of 8 floats (__m256)
-
-            //We should allocate at least 28 extra bytes so if we read the last real 
-            //float as the begining of an 8 byte block we do not overrun
-
-            int to_alloc = (size + 1);
-
-            m_boid_store = new_boidstore(to_alloc);
-            m_backbuffer = new_boidstore(to_alloc);
-
-            m_size = size;
-
-            TraceLog(LOG_DEBUG, TextFormat("Initialized Boid List of size %d", size));
-        }
-        
-        //Todo refactor this to only use new/delete 
-        ~BoidList() {
-            free_boidstore_members(m_boid_store);
-            free_boidstore_members(m_backbuffer);
-
-            delete m_boid_store;
-            delete m_backbuffer;
-
-            TraceLog(LOG_DEBUG, "Deallocated boid list");
-        }
-};
 
 class BoidMap {
     public:
@@ -967,7 +897,6 @@ int main () {
 // We can then use these to generate the transformation matricies on the GPU instead.
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy)
 {
-#if defined(GRAPHICS_API_OPENGL_33) || defined(GRAPHICS_API_OPENGL_ES2)
     #define MAX_MATERIAL_MAPS 12
     #define MAX_MESH_VERTEX_BUFFERS 7
 
@@ -1077,5 +1006,4 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     rlUnloadVertexBuffer(instances_boid_y_ID);
     rlUnloadVertexBuffer(instances_boid_vx_ID);
     rlUnloadVertexBuffer(instances_boid_vy_ID);
-#endif
 }
