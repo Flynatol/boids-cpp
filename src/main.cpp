@@ -13,11 +13,11 @@
 #include <immintrin.h>
 #include <fstream>
 
-#include "imgui.h"
 
 #define NO_FONT_AWESOME
-#include <rlImGui.h>
 #include "boidlist.h"
+#include "boidmap.h"
+#include "ui.h"
 
 std::ofstream myfile;
 
@@ -43,22 +43,6 @@ typedef int32_t Boid;
 const int screen_width = 2560;
 const int screen_height = 1440;
 
-struct Rules {
-    float avoid_distance_squared = 1000.f;
-    float avoid_factor = 0.00000002f;
-    float sight_range = SIGHT_RANGE;
-    float sight_range_squared = SIGHT_RANGE * SIGHT_RANGE;
-    float alignment_factor = 0.05f;
-    float cohesion_factor = 0.0005f;
-    int edge_width = 30;
-    float edge_factor = 0.05;
-    float rand = 0.1; 
-    float homing = 0.0000311;
-    bool show_lines = false;
-    int min_speed = 2;
-    int max_speed = 3;
-} typedef Rules;
-
 struct PerfMonitor {
     int tick_counter = 0;
     float tps;
@@ -67,61 +51,6 @@ struct PerfMonitor {
 
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
 
-class BoidMap {
-    public:
-        int m_ysize;
-        int m_xsize;
-        int m_cell_size; 
-        Boid *m_boid_map;
-
-    public:
-        BoidMap() = delete;
-        BoidMap(const int height, const int width, const int cell_size) { 
-            m_ysize = std::ceil(height / static_cast<float>(cell_size));
-            m_xsize = std::ceil(width / static_cast<float>(cell_size));
-            m_boid_map = new Boid[m_ysize * m_xsize]();
-            m_cell_size = cell_size;
-
-            TraceLog(LOG_DEBUG, TextFormat("Initalized map of size (%d x %d)", m_ysize, m_xsize));
-        }
-        
-        ~BoidMap() {
-            TraceLog(LOG_DEBUG, "Deallocated boid map");
-            delete[] m_boid_map;
-        }
-        
-        Boid get_coord(const int y, const int x) const {
-            //Little bit of safety, useful to minimize bounds checking code
-            if (x < 0 || y < 0 || x >= m_xsize || y >= m_ysize) {
-                return -1;
-            }
-
-            return m_boid_map[y * m_xsize + x];
-        }
-
-        //Returns the nearest map position (in case the supplied position is out of bounds of the map)
-        int get_map_pos_nearest(const int x, const int y) const {
-            int col = std::min(std::max(x, 0), m_cell_size * m_xsize - 1) / m_cell_size;
-            int row = std::min(std::max(y, 0), m_cell_size * m_ysize - 1) / m_cell_size;
-
-            return row * m_xsize + col;
-        }
-
-        Boid get_head_from_screen_space(const Vector2 pos) const {
-            return m_boid_map[get_map_pos_nearest(pos.x, pos.y)];
-        }
-
-        Boid get_absolute(const int n) const {
-            return m_boid_map[n];
-        }
-
-        int get_map_pos(const int x, const int y) const {
-            int row = y / m_cell_size;
-            int col = x / m_cell_size;
-
-            return row * m_xsize + col;
-        }
-};
 
 
 Boid rebuild_list(BoidList& boid_list, BoidMap& boid_map, Boid to_track) {
@@ -188,13 +117,11 @@ void populate_map(BoidList& boid_list, BoidMap& map) {
     }
 }
 
-
 template <typename T, typename U>
 union ExtractVec {
     U vector;
     T data[8];
 };
-
 
 template <typename T, typename U>
 void debug_vector(U vector, const char* format) {
@@ -203,7 +130,6 @@ void debug_vector(U vector, const char* format) {
         DEBUG(format, vec.data[i]);
     }
 }
-
 
 inline __m256i vector_sum(__m256i v) {
     auto temp = _mm256_hadd_epi32(v, v);
@@ -225,8 +151,8 @@ static Mesh GenMeshCustom(void)
     Mesh mesh = { 0 };
     mesh.triangleCount = 1;
     mesh.vertexCount = mesh.triangleCount*3;
-    mesh.vertices = (float *)MemAlloc(mesh.vertexCount*3*sizeof(float));    // 3 vertices, 3 coordinates each (x, y, z)
-    mesh.colors = (unsigned char *)MemAlloc(mesh.vertexCount*4*sizeof(unsigned char)); 
+    mesh.vertices = (float *) MemAlloc(mesh.vertexCount*3*sizeof(float));    // 3 vertices, 3 coordinates each (x, y, z)
+    mesh.colors = (unsigned char *) MemAlloc(mesh.vertexCount*4*sizeof(unsigned char)); 
     
     // Vertex at (0, 0, 0)
     mesh.vertices[0] = -TRIANGLE_SIZE;
@@ -281,7 +207,7 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
         Boid row_begin = -1;
         Boid row_end = -1;
 
-        //Todo check if this would be faster branchless
+        //Todo check if this would be faster branchless -- probably not worth the readability
         for (int cx = -1; cx <= 1; cx++) {
             Boid current = map.get_coord(y + cy, x + cx);
             if (current != -1) {
@@ -302,7 +228,7 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                 //Variables for tracking cohesion
                 float avg_x = 0, avg_y = 0;
                 
-                //Remember to mask before summation!
+                //Remember to mask!
                 __m256 sep_x_vec = _mm256_set1_ps(0.);
                 __m256 sep_y_vec = _mm256_set1_ps(0.);
                 __m256 avg_x_vec = _mm256_set1_ps(0.);
@@ -315,7 +241,7 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
 
                 __m256i read_mask;
                 
-                /*
+                /* Keeping this here as an explaination for the SIMD code below
                 //Check against each boid in the row currently being processed
                 for (Boid nearby_boid = row_end; nearby_boid < row_end; nearby_boid++) {
 
@@ -340,6 +266,9 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                 }
                 */
 
+                const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
+                const auto srs_vec = _mm256_set1_ps(rules.sight_range_squared);
+
                 for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
                     int bytes_left = row_end - nearby_boid; 
                     read_mask = _mm256_set_epi32((bytes_left > 7) * 0xFFFFFFFF, (bytes_left > 6) * 0xFFFFFFFF, (bytes_left > 5) * 0xFFFFFFFF, (bytes_left > 4) * 0xFFFFFFFF, (bytes_left > 3) * 0xFFFFFFFF, (bytes_left > 2) * 0xFFFFFFFF, (bytes_left > 1) * 0xFFFFFFFF, 0xFFFFFFFF);
@@ -353,16 +282,14 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                     const auto current_xs_vec = _mm256_set1_ps(xs[current_boid]);
                     const auto current_ys_vec = _mm256_set1_ps(ys[current_boid]);              
                     
-                    auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
-                    auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
-                    auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
+                    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
+                    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
+                    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
 
-                    //this can be moved
-                    const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
+                  
+                    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS); 
 
-                    const auto srs_mask = _mm256_cmp_ps(ds_vec, _mm256_set1_ps(rules.sight_range_squared), _CMP_LT_OS); 
-
-                    const auto ads_mask = _mm256_cmp_ps(ds_vec, _mm256_set1_ps(rules.avoid_distance_squared), _CMP_LT_OS);
+                    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);
 
                     //Warning - not a bit mask!
                     const auto sna_fpmask = _mm256_and_ps(_mm256_andnot_ps(ads_mask, srs_mask), _mm256_set1_ps(1.));
@@ -435,37 +362,6 @@ void debug_matrix(Matrix matrix) {
         DEBUG("%f, %f, %f, %f", matrix2.v[i],matrix2.v[i+4],matrix2.v[i+8],matrix2.v[i+12]);
     } 
     DEBUG("End matrix")
-}
-
-inline Matrix YAxisRotate(float angle) {
-    const float sinres = sinf(angle);
-    const float cosres = cosf(angle);
-
-    //DEBUG("sinres = %f", sinres);
-
-    Matrix res = {
-        cosres, 0.0, sinres, 0.0,
-        0.0,    1.0, 0.0,     0.0,
-        -sinres, 0.0, cosres,  0.0,
-        0.0,    0.0, 0.0,     1.0,
-    };
-    
-    return res;
-}
-
-
-inline Matrix YAxisRotateAndTranslate(float angle, float x, float y, float z) {
-    const float sinres = sinf(angle);
-    const float cosres = cosf(angle);
-
-    Matrix res = {
-        cosres,     0.0, sinres,    x,
-        0.0,        1.0, 0.0,       y,
-        -sinres,    0.0, cosres,    z,
-        0,          0.0, 0,         1.0,
-    };
-
-    return res;
 }
 
 void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
@@ -612,58 +508,6 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boi
     TraceLog(LOG_DEBUG, TextFormat("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count()));
 }
 
-void UpdateRulesWindow(Rules &rules) {
-        ImGui::Begin("Boids Settings");
-        ImGui::SliderFloat("alignment_factor", &rules.alignment_factor, 0., 1., "%0.9f");
-        ImGui::SliderFloat("sight_range", &rules.sight_range, 0., 100., "%0.9f");
-        ImGui::SliderFloat("avoid_distance_squared", &rules.avoid_distance_squared, 0., 1000., "%0.9f");
-        ImGui::SliderFloat("avoid_factor", &rules.avoid_factor, 0., 1., "%0.9f");
-        ImGui::SliderFloat("cohesion_factor", &rules.cohesion_factor, 0., 1., "%0.9f");
-        ImGui::SliderFloat("rand", &rules.rand, 0., 1., "%0.9f");
-        ImGui::SliderFloat("homing", &rules.homing, 0., 1., "%0.9f");
-        ImGui::SliderInt("edge_width", &rules.edge_width, 0, 100, "%d");
-        ImGui::SliderFloat("edge_factor", &rules.edge_factor, 0., 1., "%0.9f");
-        ImGui::Checkbox("Show Debug Lines", &rules.show_lines);
-        ImGui::End();
-
-    rules.sight_range_squared = rules.sight_range * rules.sight_range;
-}
-
-void UpdatePerfMonitor(PerfMonitor &perf_monitor, bool *rebuild_scheduled) {
-    perf_monitor.tps = GetFPS();
-        ImGui::Begin("Performance Monitor");
-        ImGui::Text("TPS: %f", perf_monitor.tps);
-        if (ImGui::Button("Rebuild")) {
-            *rebuild_scheduled = true;
-        }
-        ImGui::End();
-}
-
-void UpdateCameraWindow(Camera *camera){
-    ImGui::Begin("Camera Settings");
-    ImGui::SliderFloat("x", &camera->position.x, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("y", &camera->position.y, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("z", &camera->position.z, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("fovy", &camera->fovy, 0., 32., "%0.9f");
-
-    ImGui::SliderFloat("x_target", &camera->target.x, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("y_target", &camera->target.y, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("z_target", &camera->target.z, -1000., 1000., "%0.9f");
-
-    ImGui::End();
-
-    //camera->target = Vector3Add(camera->position, Vector3 {0., -100., 0.});
-}
-
-void UpdateCameraWindow2d(Camera2D *cam) {
-    ImGui::Begin("Camera2d Settings");
-    ImGui::SliderFloat("x_offset", &cam->offset.x, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("y_offset", &cam->offset.y, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("x_target", &cam->target.x, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("y_target", &cam->target.y, -1000., 1000., "%0.9f");
-    ImGui::SliderFloat("zoom", &cam->zoom, 0., 32., "%0.9f");
-    ImGui::End();
-}
 
 int main () {
     InitWindow(screen_width, screen_height, "RayLib Boids!");
@@ -671,9 +515,6 @@ int main () {
 
     SetTraceLogLevel(LOG_ALL);
     TraceLog(LOG_DEBUG, TextFormat("Boid size is: %d bytes", sizeof(Boid)));
-    
-    std::time_t result = std::time(nullptr);
-    TraceLog(LOG_DEBUG, TextFormat("Time is: %s", std::asctime(std::localtime(&result)) ));
 
     //SetConfigFlags(FLAG_MSAA_4X_HINT);
 
@@ -700,7 +541,24 @@ int main () {
 
     BoidList boid_list(NUM_BOIDS);
 
-    Rules rules;
+    Rules rules = {
+        .avoid_distance_squared = 1000.f,
+        .avoid_factor = 0.00000002f,
+        .sight_range = SIGHT_RANGE,
+        .sight_range_squared = SIGHT_RANGE * SIGHT_RANGE,
+        .alignment_factor = 0.05f,
+        .cohesion_factor = 0.0005f,
+        .edge_width = 30,
+        .edge_factor = 0.05,
+        .rand = 0.1,
+        .homing = 0.0000311,
+        .show_lines = false,
+        .min_speed = 2,
+        .max_speed = 3,
+    };
+
+    Ui ui;
+
     PerfMonitor perf_monitor;    
 
     myfile.open("log.log");
@@ -721,7 +579,7 @@ int main () {
 
 
     const int CELL_WIDTH = 100;
-    assert(CELL_WIDTH >= rules.sight_range);
+    //assert(CELL_WIDTH >= rules.sight_range);
     BoidMap boid_map(world_height, world_width, CELL_WIDTH);
 
     std::srand(std::time(nullptr));
@@ -750,10 +608,8 @@ int main () {
     auto homes = boid_list.m_boid_store->homes;
     auto index_nexts = boid_list.m_boid_store->index_next;
 
-    rlImGuiSetup(true);
     
     Boid selected_boid = -1;
-    bool rebuild_scheduled = false;
 
     while (WindowShouldClose() == false){  
         populate_map(boid_list, boid_map);
@@ -873,17 +729,10 @@ int main () {
                         DrawLine(x*boid_map.m_cell_size, 0, x*boid_map.m_cell_size, boid_map.m_ysize * boid_map.m_cell_size, GRAY);
                     }
                 }
-                
-
             EndMode2D();
-            
-            rlImGuiBegin();
-                UpdateRulesWindow(rules);
-                UpdatePerfMonitor(perf_monitor, &rebuild_scheduled);
-                UpdateCameraWindow(&camera);
-                UpdateCameraWindow2d(&cam);
-            rlImGuiEnd();
 
+            ui.Render(cam, camera, rules);
+            
         EndDrawing();
     }
 

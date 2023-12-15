@@ -1,10 +1,8 @@
 #include <stdlib.h>
 #include <raylib.h>
-#include "boidlist.h"
 #include <array>
 
-
-
+#include "boidlist.h"
 
 BoidList::BoidList(int size) {
     //We need to round up the amount of memory we are allocating as 

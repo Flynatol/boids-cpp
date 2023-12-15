@@ -26,7 +26,6 @@ class BoidList {
         int m_size;
 
     public:
-        BoidList() = delete;
         BoidList(int size);
         ~BoidList();
 };
