@@ -13,7 +13,6 @@
 #include <immintrin.h>
 #include <fstream>
 
-
 #define NO_FONT_AWESOME
 #include "boidlist.h"
 #include "boidmap.h"
@@ -50,7 +49,6 @@ struct PerfMonitor {
 } typedef PerfMonitor;
 
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
-
 
 
 Boid rebuild_list(BoidList& boid_list, BoidMap& boid_map, Boid to_track) {
@@ -190,7 +188,7 @@ static Mesh GenMeshCustom(void)
     return mesh;
 }
 
-void update_cell(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
+inline void update_cell(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
     Boid cell_to_update = map.get_coord(y, x);
     if (cell_to_update == -1 ) return;
 
@@ -270,9 +268,10 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                 const auto srs_vec = _mm256_set1_ps(rules.sight_range_squared);
 
                 for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
-                    int bytes_left = row_end - nearby_boid; 
-                    read_mask = _mm256_set_epi32((bytes_left > 7) * 0xFFFFFFFF, (bytes_left > 6) * 0xFFFFFFFF, (bytes_left > 5) * 0xFFFFFFFF, (bytes_left > 4) * 0xFFFFFFFF, (bytes_left > 3) * 0xFFFFFFFF, (bytes_left > 2) * 0xFFFFFFFF, (bytes_left > 1) * 0xFFFFFFFF, 0xFFFFFFFF);
+                    //int bytes_left = row_end - nearby_boid; 
+                    //read_mask = _mm256_set_epi32((bytes_left > 7) * 0xFFFFFFFF, (bytes_left > 6) * 0xFFFFFFFF, (bytes_left > 5) * 0xFFFFFFFF, (bytes_left > 4) * 0xFFFFFFFF, (bytes_left > 3) * 0xFFFFFFFF, (bytes_left > 2) * 0xFFFFFFFF, (bytes_left > 1) * 0xFFFFFFFF, 0xFFFFFFFF);
 
+                    //read_mask = _mm256_set1_epi32(0xFFFFFFFF);
                     const auto nearby_xs_vec = _mm256_loadu_ps(&xs[nearby_boid]);
                     const auto nearby_ys_vec = _mm256_loadu_ps(&ys[nearby_boid]);
 
@@ -286,13 +285,17 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                     const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
                     const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
 
-                  
+                    //Sight range squared
                     const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS); 
 
+                    //Avoid distance squared
                     const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);
 
-                    //Warning - not a bit mask!
-                    const auto sna_fpmask = _mm256_and_ps(_mm256_andnot_ps(ads_mask, srs_mask), _mm256_set1_ps(1.));
+                    //In sight, but not within avoid range.
+                    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask);
+
+                    //In sight, but not within avoid range. Warning - not a bit mask!
+                    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.));
 
                     const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec);
                     const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds);
@@ -306,7 +309,9 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                     avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec);
                     avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec);
 
-                    isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
+                    //__m256i test = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
+                    //isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
+                    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
                 }
                 
                 ExtractVec<uint32_t, __m256i> extractor_i = {vector_sum(isc)};
@@ -331,7 +336,6 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                 
                 //TraceLog(LOG_DEBUG, TextFormat("vector saw: %d --- actual %d", isc_out.data[0], in_sight_counter));
 
-
                 //Avoidance
                 vxs[current_boid] += sep_x * rules.avoid_factor;
                 vys[current_boid] += sep_y * rules.avoid_factor;
@@ -351,9 +355,147 @@ void update_cell(const BoidMap& map, const int x, const int y, const Rules& rule
                 vxs[current_boid] += (in_sight_counter > 0) * (avg_x - xs[current_boid]) * rules.cohesion_factor;
                 vys[current_boid] += (in_sight_counter > 0) * (avg_y - ys[current_boid]) * rules.cohesion_factor;
             }
-        }        
+        }       
     }
 }
+
+
+inline void update_cell2(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
+    const Boid cell_to_update = map.get_coord(y, x);
+    if (cell_to_update == -1 ) return;
+
+    const auto xs = boid_list.m_boid_store->xs;
+    const auto ys = boid_list.m_boid_store->ys;
+    const auto vxs = boid_list.m_boid_store->vxs;
+    const auto vys = boid_list.m_boid_store->vys;
+
+    const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
+    const auto srs_vec = _mm256_set1_ps(rules.sight_range_squared);
+    const auto af_vec  = _mm256_set1_ps(rules.avoid_factor);
+    
+    Boid cell_begin = cell_to_update;
+    Boid cell_end = cell_begin + boid_list.m_boid_store->depth[cell_begin];
+
+    for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid += 8) {
+        auto current_xs_vec = _mm256_loadu_ps(&xs[current_boid]);
+        auto current_ys_vec = _mm256_loadu_ps(&ys[current_boid]);              
+ 
+        //Tracking vecs
+        __m256 sep_x_vec = _mm256_set1_ps(0.);
+        __m256 sep_y_vec = _mm256_set1_ps(0.);
+
+        __m256 avg_x_vec = _mm256_set1_ps(0.);
+        __m256 avg_y_vec = _mm256_set1_ps(0.);
+
+        __m256 avg_vx_vec = _mm256_set1_ps(0.);
+        __m256 avg_vy_vec = _mm256_set1_ps(0.);
+
+        __m256i isc = _mm256_set1_epi32(0);
+
+        //For each row 
+        for (int cy = -1; cy <= 1; cy++) {
+            Boid row_begin = -1;
+            Boid row_end = -1;
+
+            //Todo check if this would be faster branchless -- probably not worth the readability
+            for (int cx = -1; cx <= 1; cx++) {
+                Boid current = map.get_coord(y + cy, x + cx);
+                if (current != -1) {
+                    if (row_begin == -1) row_begin = current;
+                    row_end = current + boid_list.m_boid_store->depth[current];
+                }
+            }
+
+            // For each block of boids in current row
+            for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
+                auto nearby_xs_vec = _mm256_loadu_ps(&xs[nearby_boid]);
+                auto nearby_ys_vec = _mm256_loadu_ps(&ys[nearby_boid]);
+
+                auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
+                auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
+
+                //auto test_vec = _mm256_set_ps(0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f);
+
+                //For each of the 8 permutations do some work TODO unroll this and use the faster in lane permute most of the time
+                for (int i = 0; i < 8; i++) {
+                    //Do some stuff                    
+                    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
+                    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
+                    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
+
+                    //Sight range squared
+                    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS); 
+
+                    //Avoid distance squared
+                    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);
+
+                    //In sight, but not within avoid range.
+                    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask);
+
+                    //In sight, but not within avoid range. Warning - not a bit mask!
+                    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.));
+
+                    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec);
+                    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds);
+                    
+                    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr)));
+                    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr)));
+
+                    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec);
+                    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec);
+
+                    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec);
+                    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec);
+
+                    //__m256i test = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
+                    //isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
+                    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
+
+                    //Then permute
+                    //test_vec        = _mm256_permutevar8x32_ps(test_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
+                    nearby_xs_vec   = _mm256_permutevar8x32_ps(nearby_xs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
+                    nearby_ys_vec   = _mm256_permutevar8x32_ps(nearby_ys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
+                    nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
+                    nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
+                }
+            }
+        }
+
+        //Write out the data from tracking vecs
+        //I should probably change the type of ISC
+        auto isc_mask = _mm256_cmpgt_epi32(isc, _mm256_set1_epi32(0));
+
+
+        //Avoidance
+        auto vxs_out = _mm256_loadu_ps(&vxs[current_boid]);
+        auto vys_out = _mm256_loadu_ps(&vys[current_boid]);
+
+        vxs_out = _mm256_fmadd_ps(sep_x_vec, af_vec, vxs_out);
+        vys_out = _mm256_fmadd_ps(sep_y_vec, af_vec, vys_out);
+        
+
+        //Alignment
+        avg_vx_vec = _mm256_div_ps(avg_vx_vec, _mm256_cvtepi32_ps(isc));
+        avg_vy_vec = _mm256_div_ps(avg_vy_vec, _mm256_cvtepi32_ps(isc));
+        
+        vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.alignment_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_vx_vec, vxs_out)), vxs_out);
+        vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.alignment_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_vy_vec, vys_out)), vys_out);
+
+        //Cohesion
+        avg_x_vec = _mm256_div_ps(avg_x_vec, _mm256_cvtepi32_ps(isc));
+        avg_y_vec = _mm256_div_ps(avg_y_vec, _mm256_cvtepi32_ps(isc));
+        
+        vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.cohesion_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_x_vec, current_xs_vec)), vxs_out);
+        vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.cohesion_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_y_vec, current_ys_vec)), vys_out);
+
+
+        //Maybe we should mask here to avoid messing up data in the next cell.
+        //But generating that mask is somewhat expensive 
+        _mm256_storeu_ps(&vxs[current_boid], vxs_out);
+        _mm256_storeu_ps(&vys[current_boid], vys_out);
+    } 
+}
+
 
 void debug_matrix(Matrix matrix) {
     float16 matrix2 = MatrixToFloatV(matrix);
@@ -364,7 +506,7 @@ void debug_matrix(Matrix matrix) {
     DEBUG("End matrix")
 }
 
-void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
+inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
     const auto xs = boid_list.m_boid_store->xs;
     const auto ys = boid_list.m_boid_store->ys;
     const auto vxs = boid_list.m_boid_store->vxs;
@@ -376,6 +518,7 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
+    /*
     //Moving rand to it's own loop to avoid having to vectorize rand for now. (Might disable rand)
     for (Boid boid = 0; boid < boid_list.m_size; boid++) { 
         //Apply some randomness
@@ -385,7 +528,7 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
         vxs[boid] += rx * rules.rand;
         vys[boid] += ry * rules.rand;
     } 
-
+    */
 
     //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
     for (Boid boid = 0; boid < boid_list.m_size; boid++) {       
@@ -408,11 +551,19 @@ void update_non_interacting(const BoidMap& boid_map, const Rules& rules, const B
 
         float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
 
-        speed = speed + (!speed);
+        //speed = speed + (!speed);
+        
+        auto const minspeed = 3.0f;
+        auto const maxspeed = 4.0f;
 
-        float ispeed = 3.0f/speed;
-        vxs[boid] = vxs[boid]*ispeed;
-        vys[boid] = vys[boid]*ispeed;
+        float ispeed = maxspeed/speed;
+        float lspeed = minspeed/speed;
+
+        vxs[boid] = (speed <= maxspeed) * vxs[boid] + (speed > maxspeed) * vxs[boid] * ispeed;
+        vys[boid] = (speed <= maxspeed) * vys[boid] + (speed > maxspeed) * vys[boid] * ispeed;
+
+        vxs[boid] = (speed >= minspeed) * vxs[boid] + (speed < minspeed) * vxs[boid] * lspeed;
+        vys[boid] = (speed >= minspeed) * vys[boid] + (speed < minspeed) * vys[boid] * lspeed;
 
         //if (boid < 8) DEBUG("xs[b]: %f", ys[boid] + vys[boid]*ispeed);
         
@@ -495,7 +646,8 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boi
 
     for (int y = 0; y < boid_map.m_ysize; y++) {
         for (int x = 0; x < boid_map.m_xsize; x++) {
-            update_cell(boid_map, x, y, rules, selected_boid, boid_list);
+            //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
+            update_cell2(boid_map, x, y, rules, selected_boid, boid_list);
         }
     }
 
@@ -588,14 +740,22 @@ int main () {
     std::uniform_real_distribution<float> width_distribution (rules.edge_width, world_width - rules.edge_width);
     std::uniform_real_distribution<float> height_distribution (rules.edge_width, world_height - rules.edge_width);
 
+    //TODO just clean this up
+    std::uniform_real_distribution<float> width_distribution2 (-((world_width - rules.edge_width * 2) /  16) / 2, ((world_width - rules.edge_width * 2) /  16) / 2);
+    std::uniform_real_distribution<float> height_distribution2 (-((world_width - rules.edge_width * 2) /  9) / 2, ((world_width - rules.edge_width * 2) /  9) / 2);
+
     //Populate some test boids
     for (int i = 0; i < boid_list.m_size; i++) {
         boid_list.m_boid_store->index_next[i] = -1;
-        boid_list.m_boid_store->xs[i] = width_distribution(generator);
-        boid_list.m_boid_store->ys[i] = height_distribution(generator);
         boid_list.m_boid_store->vxs[i] = (std::rand() % 3) - 1;
         boid_list.m_boid_store->vys[i] = (std::rand() % 3) - 1;
         boid_list.m_boid_store->homes[i] = rand() % 144;
+
+        int home_index_y = boid_list.m_boid_store->homes[i] / 16;
+        int home_index_x = boid_list.m_boid_store->homes[i] % 16;
+
+        boid_list.m_boid_store->xs[i] = home_index_x * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width + width_distribution2(generator);
+        boid_list.m_boid_store->ys[i] = home_index_y * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width + height_distribution2(generator);
     }
 
 
@@ -655,13 +815,12 @@ int main () {
 
             camera.fovy = screen_height / cam.zoom;
 
-            auto new_pos = Vector3 {
-                .x = (screen_width * 0.5 - cam.offset.x) / cam.zoom + cam.target.x,
+            camera.position = Vector3 {
+                .x = (screen_width * 0.5f - cam.offset.x) / cam.zoom + cam.target.x,
                 .y = camera.position.y,
-                .z = (screen_height * 0.5 - cam.offset.y) / cam.zoom + cam.target.y,
+                .z = (screen_height * 0.5f - cam.offset.y) / cam.zoom + cam.target.y,
             };
-            
-            camera.position = new_pos;
+
             camera.target = Vector3 {camera.position.x, 0.f, camera.position.z};
         }
         
@@ -697,17 +856,6 @@ int main () {
             //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
 
             BeginMode2D(cam);
-                /* 2d render mode code
-                for (int i = 0; i < boid_list.m_size; i++) {
-                    rlPushMatrix();
-                        rlTranslatef(xs[i], ys[i], 0);
-                        float angle = (atan2(vxs[i], vys[i]) * 360.) / (2 * PI);
-                        rlRotatef(angle, 0, 0, -1);
-                        DrawTriangle(triangle[2], triangle[1], triangle[0], WHITE);
-                    rlPopMatrix();
-                } 
-                */
-            
                 Boid current = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
                 while (current != -1) {
                     rlPushMatrix();
@@ -732,7 +880,7 @@ int main () {
             EndMode2D();
 
             ui.Render(cam, camera, rules);
-            
+
         EndDrawing();
     }
 
