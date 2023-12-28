@@ -30,7 +30,7 @@ Boid BoidMap::get_coord(const int y, const int x) const {
 }
 
 //Returns the nearest map position (in case the supplied position is out of bounds of the map)
-int BoidMap::get_map_pos_nearest(const int x, const int y) const {
+Boid BoidMap::get_map_pos_nearest(const int x, const int y) const {
     int col = std::min(std::max(x, 0), m_cell_size * m_xsize - 1) / m_cell_size;
     int row = std::min(std::max(y, 0), m_cell_size * m_ysize - 1) / m_cell_size;
 

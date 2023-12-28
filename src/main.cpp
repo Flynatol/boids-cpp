@@ -14,18 +14,22 @@
 #include <fstream>
 
 #define NO_FONT_AWESOME
+
 #include "boidlist.h"
 #include "boidmap.h"
 #include "ui.h"
+#include <thread>
 
 std::ofstream myfile;
 
 const float TRIANGLE_SIZE = 5.f;
-const uint32_t NUM_BOIDS = 100000;
+const uint32_t NUM_BOIDS = 1000000;
 const uint16_t SIGHT_RANGE = 100;
 
 #define FRAME_RATE_LIMIT 165
-#define WORLD_SIZE_MULT 10
+#define WORLD_SIZE_MULT 25
+#define NUM_THREADS 16
+#define USE_MULTICORE 
 
 static const Vector2 triangle[3] = {
     Vector2 {0.f, 2 * TRIANGLE_SIZE},
@@ -50,14 +54,57 @@ struct PerfMonitor {
 
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
 
+void write_map_to_list(int i, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+    auto main_buffer = boid_list->m_boid_store;
+    auto back_buffer = boid_list->m_backbuffer;
 
-Boid rebuild_list(BoidList& boid_list, BoidMap& boid_map, Boid to_track) {
+    int index = index_buffer[i];
+    Boid current = boid_map->get_absolute(i);
+
+    if (current != -1) {
+        boid_map->m_boid_map[i] = index;
+    }
+    
+    while (current != -1) {
+        back_buffer->xs[index] = main_buffer->xs[current];
+        back_buffer->ys[index] = main_buffer->ys[current];
+        back_buffer->vxs[index] = main_buffer->vxs[current];
+        back_buffer->vys[index] = main_buffer->vys[current];
+        back_buffer->homes[index] = main_buffer->homes[current];
+        back_buffer->depth[index] = main_buffer->depth[current];
+
+        Boid next = main_buffer->index_next[current];
+        
+        if (next != -1) {
+            back_buffer->index_next[index] = index + 1;
+        } else {
+            back_buffer->index_next[index] = -1;
+        }
+        
+        current = next;
+        index++;
+    }
+}
+
+void block_writer(int thread_start_pos, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+    for (int i = 0; i < (boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS; i++) {
+        write_map_to_list(thread_start_pos + i, index_buffer, boid_list, boid_map);
+    }
+}
+
+void jump_writer(int thread_start_pos, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+    for (int i = thread_start_pos; i < (boid_map->m_xsize * boid_map->m_ysize); i += NUM_THREADS) {
+        write_map_to_list(i, index_buffer, boid_list, boid_map);
+    }
+}
+
+void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
+    auto t_start = std::chrono::high_resolution_clock::now();
     BoidStore *main_buffer = boid_list.m_boid_store;
     BoidStore *back_buffer = boid_list.m_backbuffer;
-
-    Boid new_pos = -1;
-
+    /*
     int index = 0;
+    //Go through every cell in the map (find every head node)
     for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
         //Set current to the head node of the current cell (i)
         Boid current = boid_map.get_absolute(i);
@@ -76,8 +123,6 @@ Boid rebuild_list(BoidList& boid_list, BoidMap& boid_map, Boid to_track) {
             back_buffer->depth[index] = main_buffer->depth[current];
 
             Boid next = main_buffer->index_next[current];
-
-            if (current == to_track) new_pos = index;
             
             if (next != -1) {
                 back_buffer->index_next[index] = index + 1;
@@ -92,28 +137,77 @@ Boid rebuild_list(BoidList& boid_list, BoidMap& boid_map, Boid to_track) {
 
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
+    */
+    // NEW PLAN
+    // ONE PASS to store index to write to in new list for each cell
+    // THEN USE MT to update the list from many points at once.
 
-    return new_pos;
-}
+    //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
 
-void populate_map(BoidList& boid_list, BoidMap& map) {
-    for (int i = 0; i < map.m_xsize * map.m_ysize; i++) {
-        map.m_boid_map[i] = -1;
+    Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid));
+
+    int counter = 0;
+    for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
+        Boid current = boid_map.m_boid_map[i];
+        index_buffer[i] = counter;
+        counter += (current != -1) * main_buffer->depth[current];   
     }
 
-    //todo slight problem here is that we are WILL reverse the memory positions in each cell each update.
+    auto t_mid = std::chrono::high_resolution_clock::now();
+
+    std::thread threads[NUM_THREADS];
+    
+    for (int i = 0; i < NUM_THREADS; i++) {
+        int num = i * ((boid_map.m_xsize * boid_map.m_ysize) / NUM_THREADS);
+        threads[i] = std::thread(block_writer, num, index_buffer, &boid_list, &boid_map);
+    }
+    
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads[i].join();
+    }
+    
+    boid_list.m_boid_store = back_buffer;
+    boid_list.m_backbuffer = main_buffer;
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+}
+
+
+void populate_map(BoidList& boid_list, BoidMap& map) {
+    
+    //for (int i = 0; i < map.m_xsize * map.m_ysize; i++) {
+    //    map.m_boid_map[i] = -1;
+    //}
+
+    memset(map.m_boid_map, -1, sizeof(Boid) * map.m_xsize * map.m_ysize);
+
+    //TODO: slight problem here is that we are WILL reverse the memory positions in each cell each update.
     //Maybe we can fix this writing into the new list in reverse order in the rebuild list function (Use the depth to work out correct positions).
     //Or we can fix this by building our linked list s.t. the first boid we find in a cell will stay as the head.
     //This would be performance intensive.
-    for (int i = 0; i < boid_list.m_size; i++) {
-        Boid boid_to_place = i;
-        int map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]); //No one said that vectorization would be pretty...
+    
+    for (Boid boid_to_place = 0; boid_to_place < boid_list.m_size; boid_to_place++) {
+        Boid map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]);
         Boid old_head = map.m_boid_map[map_pos];
         map.m_boid_map[map_pos] = boid_to_place;
         boid_list.m_boid_store->index_next[boid_to_place] = old_head;
         boid_list.m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list.m_boid_store->depth[old_head] + 1 : 1;
     }
+    
+    /*
+    for (Boid boid_to_place = boid_list.m_size; boid_to_place > 0; boid_to_place--) {
+        int map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place - 1], boid_list.m_boid_store->ys[boid_to_place - 1]);
+        Boid old_head = map.m_boid_map[map_pos];
+        map.m_boid_map[map_pos] = boid_to_place - 1;
+        boid_list.m_boid_store->index_next[boid_to_place - 1] = old_head;
+        boid_list.m_boid_store->depth[boid_to_place - 1] = (old_head != -1) * boid_list.m_boid_store->depth[old_head] + 1;
+    }
+    */
+
+   // To parallelize this we could use an array of mutexs to represent to the head of each map cell
+   // If we put distant rows on each thread unlikely to have waiting.
 }
+
 
 template <typename T, typename U>
 union ExtractVec {
@@ -360,21 +454,24 @@ inline void update_cell(const BoidMap& map, const int x, const int y, const Rule
 }
 
 
-inline void update_cell2(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
-    const Boid cell_to_update = map.get_coord(y, x);
+inline void update_cell2(const BoidMap *map, const int x, const int y, const Rules *rules, const BoidList *boid_list) {
+    const auto world_height = map->m_cell_size * map->m_ysize;
+    const auto world_width = map->m_cell_size * map->m_xsize;
+
+    const Boid cell_to_update = map->get_coord(y, x);
     if (cell_to_update == -1 ) return;
 
-    const auto xs = boid_list.m_boid_store->xs;
-    const auto ys = boid_list.m_boid_store->ys;
-    const auto vxs = boid_list.m_boid_store->vxs;
-    const auto vys = boid_list.m_boid_store->vys;
+    const auto xs = boid_list->m_boid_store->xs;
+    const auto ys = boid_list->m_boid_store->ys;
+    const auto vxs = boid_list->m_boid_store->vxs;
+    const auto vys = boid_list->m_boid_store->vys;
 
-    const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
-    const auto srs_vec = _mm256_set1_ps(rules.sight_range_squared);
-    const auto af_vec  = _mm256_set1_ps(rules.avoid_factor);
+    const auto ads_vec = _mm256_set1_ps(rules->avoid_distance_squared);
+    const auto srs_vec = _mm256_set1_ps(rules->sight_range_squared);
+    const auto af_vec  = _mm256_set1_ps(rules->avoid_factor);
     
     Boid cell_begin = cell_to_update;
-    Boid cell_end = cell_begin + boid_list.m_boid_store->depth[cell_begin];
+    Boid cell_end = cell_begin + boid_list->m_boid_store->depth[cell_begin];
 
     for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid += 8) {
         auto current_xs_vec = _mm256_loadu_ps(&xs[current_boid]);
@@ -399,10 +496,10 @@ inline void update_cell2(const BoidMap& map, const int x, const int y, const Rul
 
             //Todo check if this would be faster branchless -- probably not worth the readability
             for (int cx = -1; cx <= 1; cx++) {
-                Boid current = map.get_coord(y + cy, x + cx);
+                Boid current = map->get_coord(y + cy, x + cx);
                 if (current != -1) {
                     if (row_begin == -1) row_begin = current;
-                    row_end = current + boid_list.m_boid_store->depth[current];
+                    row_end = current + boid_list->m_boid_store->depth[current];
                 }
             }
 
@@ -463,8 +560,7 @@ inline void update_cell2(const BoidMap& map, const int x, const int y, const Rul
 
         //Write out the data from tracking vecs
         //I should probably change the type of ISC
-        auto isc_mask = _mm256_cmpgt_epi32(isc, _mm256_set1_epi32(0));
-
+        __m256 isc_mask = (__m256) _mm256_cmpgt_epi32(isc, _mm256_set1_epi32(0));
 
         //Avoidance
         auto vxs_out = _mm256_loadu_ps(&vxs[current_boid]);
@@ -472,25 +568,101 @@ inline void update_cell2(const BoidMap& map, const int x, const int y, const Rul
 
         vxs_out = _mm256_fmadd_ps(sep_x_vec, af_vec, vxs_out);
         vys_out = _mm256_fmadd_ps(sep_y_vec, af_vec, vys_out);
-        
+
+        auto cvt_isc = _mm256_cvtepi32_ps(isc);
 
         //Alignment
-        avg_vx_vec = _mm256_div_ps(avg_vx_vec, _mm256_cvtepi32_ps(isc));
-        avg_vy_vec = _mm256_div_ps(avg_vy_vec, _mm256_cvtepi32_ps(isc));
+        avg_vx_vec = _mm256_div_ps(avg_vx_vec, cvt_isc);
+        avg_vy_vec = _mm256_div_ps(avg_vy_vec, cvt_isc);
         
-        vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.alignment_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_vx_vec, vxs_out)), vxs_out);
-        vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.alignment_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_vy_vec, vys_out)), vys_out);
+        vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->alignment_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_vx_vec, vxs_out)), vxs_out);
+        vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->alignment_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_vy_vec, vys_out)), vys_out);
 
         //Cohesion
-        avg_x_vec = _mm256_div_ps(avg_x_vec, _mm256_cvtepi32_ps(isc));
-        avg_y_vec = _mm256_div_ps(avg_y_vec, _mm256_cvtepi32_ps(isc));
+        avg_x_vec = _mm256_div_ps(avg_x_vec, cvt_isc);
+        avg_y_vec = _mm256_div_ps(avg_y_vec, cvt_isc);
         
-        vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.cohesion_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_x_vec, current_xs_vec)), vxs_out);
-        vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules.cohesion_factor), _mm256_and_ps((__m256) isc_mask, _mm256_sub_ps(avg_y_vec, current_ys_vec)), vys_out);
+        vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->cohesion_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_x_vec, current_xs_vec)), vxs_out);
+        vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->cohesion_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_y_vec, current_ys_vec)), vys_out);
 
+        
+        //Window edges
+        const auto rf = _mm256_set1_ps(rules->edge_factor);
+        const auto ew = _mm256_set1_ps(rules->edge_width);
+        const auto wh = _mm256_set1_ps(world_height);
+        const auto ww = _mm256_set1_ps(world_width);
+
+        auto cmpx_1 = _mm256_cmp_ps(current_xs_vec, ew, _CMP_LT_OS);
+        auto cmpx_2 = _mm256_cmp_ps(current_xs_vec, _mm256_set1_ps(world_width - rules->edge_width), _CMP_GT_OS);
+        auto cmpy_1 = _mm256_cmp_ps(current_ys_vec, ew, _CMP_LT_OS);
+        auto cmpy_2 = _mm256_cmp_ps(current_ys_vec, _mm256_set1_ps(world_height - rules->edge_width), _CMP_GT_OS);
+
+        vxs_out = _mm256_add_ps(vxs_out, _mm256_sub_ps(_mm256_and_ps(cmpx_1, rf), _mm256_and_ps(cmpx_2, rf)));
+        vys_out = _mm256_add_ps(vys_out, _mm256_sub_ps(_mm256_and_ps(cmpy_1, rf), _mm256_and_ps(cmpy_2, rf)));
+        
+
+        //Apply homing
+
+        //TODO
+
+        //Update Xs and Ys
+        /*
+        float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
+        
+        
+        //speed = speed + (!speed);
+        
+        auto const minspeed = 3.0f;
+        auto const maxspeed = 4.0f;
+
+        float ispeed = maxspeed/speed;
+        float lspeed = minspeed/speed;
+
+        vxs[boid] = (speed <= maxspeed) * vxs[boid] + (speed > maxspeed) * vxs[boid] * ispeed;
+        vys[boid] = (speed <= maxspeed) * vys[boid] + (speed > maxspeed) * vys[boid] * ispeed;
+
+        vxs[boid] = (speed >= minspeed) * vxs[boid] + (speed < minspeed) * vxs[boid] * lspeed;
+        vys[boid] = (speed >= minspeed) * vys[boid] + (speed < minspeed) * vys[boid] * lspeed;
+
+        //if (boid < 8) DEBUG("xs[b]: %f", ys[boid] + vys[boid]*ispeed);
+        
+        xs[boid] += vxs[boid];
+        ys[boid] += vys[boid];        
+        */
+
+        
+        auto const minspeed = 3.0f;
+        auto const maxspeed = 4.0f;
+
+        auto rspeed_vec = _mm256_rsqrt_ps(_mm256_add_ps(_mm256_mul_ps(vxs_out, vxs_out), _mm256_mul_ps(vys_out, vys_out)));
+
+        auto ispeed_vec = _mm256_mul_ps(rspeed_vec, _mm256_set1_ps(maxspeed));
+        auto lspeed_vec = _mm256_mul_ps(rspeed_vec, _mm256_set1_ps(minspeed));
+
+        auto too_slow = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(1.0/minspeed), _CMP_GT_OS);
+        auto too_fast = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(1.0/maxspeed), _CMP_LT_OS);
+        auto too_inf = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(__FLT_MAX__), _CMP_GT_OS);
+
+        auto multiplers = _mm256_set1_ps(1.0);
+        multiplers = _mm256_blendv_ps(multiplers, lspeed_vec, too_slow);
+        multiplers = _mm256_blendv_ps(multiplers, ispeed_vec, too_fast);
+        multiplers = _mm256_blendv_ps(multiplers, _mm256_set1_ps(1.0), too_inf);
+
+        vxs_out = _mm256_mul_ps(multiplers, vxs_out);
+        vys_out = _mm256_mul_ps(multiplers, vys_out);
+
+        //vxs_out = vxs_out_temp;
+        //vys_out = vys_out_temp;
 
         //Maybe we should mask here to avoid messing up data in the next cell.
-        //But generating that mask is somewhat expensive 
+        //But generating that mask is somewhat expensive
+        //current_xs_vec = _mm256_add_ps(current_xs_vec, vxs_out);
+        //current_ys_vec = _mm256_add_ps(current_ys_vec, vys_out);
+        
+
+        //_mm256_storeu_ps(&xs[current_boid], current_xs_vec);
+        //_mm256_storeu_ps(&ys[current_boid], current_ys_vec);
+
         _mm256_storeu_ps(&vxs[current_boid], vxs_out);
         _mm256_storeu_ps(&vys[current_boid], vys_out);
     } 
@@ -515,8 +687,6 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
 
     const auto world_height = boid_map.m_cell_size * boid_map.m_ysize;
     const auto world_width = boid_map.m_cell_size * boid_map.m_xsize;
-
-    auto t_start = std::chrono::high_resolution_clock::now();
 
     /*
     //Moving rand to it's own loop to avoid having to vectorize rand for now. (Might disable rand)
@@ -550,7 +720,7 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
         vys[boid] += dy * rules.homing;
 
         float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
-
+        
         //speed = speed + (!speed);
         
         auto const minspeed = 3.0f;
@@ -641,19 +811,128 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
     */
 }
 
-void update_boids(const BoidMap& boid_map, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
-    auto t_start = std::chrono::high_resolution_clock::now();
+inline void update_non_interacting2(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
+    const auto xs = boid_list.m_boid_store->xs;
+    const auto ys = boid_list.m_boid_store->ys;
+    const auto vxs = boid_list.m_boid_store->vxs;
+    const auto vys = boid_list.m_boid_store->vys;
+    const auto homes = boid_list.m_boid_store->homes;
 
-    for (int y = 0; y < boid_map.m_ysize; y++) {
-        for (int x = 0; x < boid_map.m_xsize; x++) {
+    const auto world_height = boid_map.m_cell_size * boid_map.m_ysize;
+    const auto world_width = boid_map.m_cell_size * boid_map.m_xsize;
+
+    //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
+    for (Boid boid = 0; boid < boid_list.m_size; boid++) {     
+        int home_index_y = homes[boid] / 16;
+        int home_index_x = homes[boid] % 16;
+
+        float home_loc_x = home_index_x * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
+        float home_loc_y = home_index_y * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
+
+        float dx = home_loc_x - xs[boid];
+        float dy = home_loc_y - ys[boid];
+
+        vxs[boid] += dx * rules.homing;
+        vys[boid] += dy * rules.homing;
+
+          
+        xs[boid] += vxs[boid];
+        ys[boid] += vys[boid];        
+    }
+}
+
+void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
+    for (int x = 0; x < boid_map->m_xsize; x++) {
+        update_cell2(boid_map, x, y, rules, boid_list);
+    }
+}
+
+void full_runner(const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+    for (int y = 0; y < boid_map->m_ysize; y += 2) {
+        for (int x = 0; x < boid_map->m_xsize; x++) {
             //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
-            update_cell2(boid_map, x, y, rules, selected_boid, boid_list);
+            update_cell2(boid_map, x, y, rules, boid_list);
+            
         }
     }
 
+    for (int y = 1; y < boid_map->m_ysize; y+=2) {
+        for (int x = 0; x < boid_map->m_xsize; x++) {
+            //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
+            update_cell2(boid_map, x, y, rules, boid_list);
+        }
+    }
+}
+
+//Allocates rows in blocks to each thread
+void block_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+    for (int y = thread_num * (boid_map->m_ysize / NUM_THREADS) + offset; y < (thread_num + 1) * (boid_map->m_ysize / NUM_THREADS); y += 2) {
+        for (int x = 0; x < boid_map->m_xsize; x++) {
+            update_cell2(boid_map, x, y, rules, boid_list);
+        }
+    }
+}
+
+//Stripes allocations to each thread (hopefully more cache local)
+inline void jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+    for (int y = thread_num * 2 + offset; y < boid_map->m_ysize; y += 2 * NUM_THREADS) {
+        for (int x = 0; x < boid_map->m_xsize; x++) {
+            update_cell2(boid_map, x, y, rules, boid_list);
+        }
+    }
+}
+
+
+void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    #ifndef USE_MULTICORE
+
+    for (int y = 0; y < boid_map.m_ysize; y += 2) {
+        for (int x = 0; x < boid_map.m_xsize; x++) {
+            //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
+            update_cell2(&boid_map, x, y, &rules, &boid_list);
+            
+        }
+    }
+
+    for (int y = 1; y < boid_map.m_ysize; y+=2) {
+        for (int x = 0; x < boid_map.m_xsize; x++) {
+            //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
+            update_cell2(&boid_map, x, y, &rules, &boid_list);
+        }
+    }
+
+    #endif
+
+    #ifdef USE_MULTICORE
+
+    std::thread threads[NUM_THREADS];
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        //block_runner(i, false, &boid_map, &rules, &boid_list);
+        threads[i] = std::thread(jump_runner, i, false, &boid_map, &rules, &boid_list);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads[i].join();
+    }
+
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        //block_runner(i, true, &boid_map, &rules, &boid_list);
+        threads[i] = std::thread(jump_runner, i, true, &boid_map, &rules, &boid_list);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads[i].join();
+    }
+
+    #endif
+    
     auto t_mid = std::chrono::high_resolution_clock::now();
 
-    update_non_interacting(boid_map, rules, boid_list);
+    update_non_interacting2(boid_map, rules, boid_list);
 
     auto t_end = std::chrono::high_resolution_clock::now();
 
@@ -703,7 +982,7 @@ int main () {
         .edge_width = 30,
         .edge_factor = 0.05,
         .rand = 0.1,
-        .homing = 0.0000311,
+        .homing = 0.0000051,
         .show_lines = false,
         .min_speed = 2,
         .max_speed = 3,
@@ -769,11 +1048,15 @@ int main () {
     auto index_nexts = boid_list.m_boid_store->index_next;
 
     
-    Boid selected_boid = -1;
 
     while (WindowShouldClose() == false){  
+        auto t_start = std::chrono::high_resolution_clock::now();
         populate_map(boid_list, boid_map);
-        selected_boid = rebuild_list(boid_list, boid_map, selected_boid);
+        auto t_mid = std::chrono::high_resolution_clock::now();
+        rebuild_list(boid_list, boid_map);
+        auto t_end = std::chrono::high_resolution_clock::now();
+
+        DEBUG("Populate :%0.12f, rebuild: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count());
 
         xs = boid_list.m_boid_store->xs;
         ys = boid_list.m_boid_store->ys;
@@ -785,7 +1068,7 @@ int main () {
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
         SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
 
-        update_boids(boid_map, rules, selected_boid, boid_list);
+        update_boids(boid_map, rules, boid_list);
 
 
         //TODO move camera stuff to class
@@ -824,6 +1107,7 @@ int main () {
             camera.target = Vector3 {camera.position.x, 0.f, camera.position.z};
         }
         
+        /*
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             auto mouse_pos = GetScreenToWorld2D(GetMousePosition(), cam);
             Boid current = boid_map.get_head_from_screen_space(mouse_pos);
@@ -841,7 +1125,8 @@ int main () {
 
             selected_boid = nearest;
         }                
-        
+        */
+
         BeginDrawing();
             ClearBackground(BLACK);
 
