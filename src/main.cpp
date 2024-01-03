@@ -86,6 +86,39 @@ void write_map_to_list(int i, const Boid* index_buffer, const BoidList *boid_lis
     }
 }
 
+//TODO rewrite this s.t. it writes boids in reverse order 
+void write_map_to_list_back(int i, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+    auto main_buffer = boid_list->m_boid_store;
+    auto back_buffer = boid_list->m_backbuffer;
+
+    int index = index_buffer[i];
+    Boid current = boid_map->get_absolute(i);
+
+    if (current != -1) {
+        boid_map->m_boid_map[i] = index;
+    }
+    
+    while (current != -1) {
+        back_buffer->xs[index] = main_buffer->xs[current];
+        back_buffer->ys[index] = main_buffer->ys[current];
+        back_buffer->vxs[index] = main_buffer->vxs[current];
+        back_buffer->vys[index] = main_buffer->vys[current];
+        back_buffer->homes[index] = main_buffer->homes[current];
+        back_buffer->depth[index] = main_buffer->depth[current];
+
+        Boid next = main_buffer->index_next[current];
+        
+        if (next != -1) {
+            back_buffer->index_next[index] = index + 1;
+        } else {
+            back_buffer->index_next[index] = -1;
+        }
+        
+        current = next;
+        index++;
+    }
+}
+
 void block_writer(int thread_start_pos, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
     for (int i = 0; i < (boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS; i++) {
         write_map_to_list(thread_start_pos + i, index_buffer, boid_list, boid_map);
@@ -453,6 +486,26 @@ inline void update_cell(const BoidMap& map, const int x, const int y, const Rule
     }
 }
 
+#define CALC_AVG                       \
+        { \
+        const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);\
+        const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);\
+        const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));\
+        const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS);\         
+        const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);\           
+        const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask); \            
+        const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.)); \ 
+        const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec); \
+        const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds); \
+        sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))); \
+        sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))); \
+        avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec); \
+        avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec); \
+        avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec); \ 
+        avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); \
+        isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); \
+        }
+
 
 inline void update_cell2(const BoidMap *map, const int x, const int y, const Rules *rules, const BoidList *boid_list) {
     const auto world_height = map->m_cell_size * map->m_ysize;
@@ -511,10 +564,16 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                 auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
                 auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
 
-                //auto test_vec = _mm256_set_ps(0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f);
-
+                auto test_vec = _mm256_set_ps(0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f);
+                //DEBUG("Test started");
                 //For each of the 8 permutations do some work TODO unroll this and use the faster in lane permute most of the time
+                
                 for (int i = 0; i < 8; i++) {
+                    //debug_vector<float>(test_vec, "%f");
+                    //test_vec = _mm256_permutevar8x32_ps(test_vec, _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0));
+                    //test_vec = _mm256_shuffle_ps(test_vec, test_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    
+                    
                     //Do some stuff                    
                     const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
                     const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
@@ -547,7 +606,8 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     //__m256i test = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
                     //isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
                     isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
-
+                    
+                    
                     //Then permute
                     //test_vec        = _mm256_permutevar8x32_ps(test_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                     nearby_xs_vec   = _mm256_permutevar8x32_ps(nearby_xs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
@@ -555,6 +615,40 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                     nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                 }
+                /*
+                //Do stuff
+                CALC_AVG
+                
+                //Then (permute + do stuff) x 3
+                for (int i = 4; i > 0; i--) {
+                    nearby_xs_vec   = _mm256_shuffle_ps(nearby_xs_vec, nearby_xs_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    nearby_ys_vec   = _mm256_shuffle_ps(nearby_ys_vec, nearby_ys_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    nearby_vxs_vec  = _mm256_shuffle_ps(nearby_vxs_vec, nearby_vxs_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    nearby_vys_vec  = _mm256_shuffle_ps(nearby_vys_vec, nearby_vys_vec, _MM_SHUFFLE(0, 3, 2, 1));
+
+                    CALC_AVG
+                }
+                //Big flip TODO
+                nearby_xs_vec   = _mm256_permutevar8x32_ps(nearby_xs_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
+                nearby_ys_vec   = _mm256_permutevar8x32_ps(nearby_ys_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
+                nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
+                nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
+
+                
+                //Do stuff
+
+                CALC_AVG
+
+                //Then (permute + do stuff) x 3
+                for (int i = 4; i > 0; i--) {
+                    nearby_xs_vec   = _mm256_shuffle_ps(nearby_xs_vec, nearby_xs_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    nearby_ys_vec   = _mm256_shuffle_ps(nearby_ys_vec, nearby_ys_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    nearby_vxs_vec  = _mm256_shuffle_ps(nearby_vxs_vec, nearby_vxs_vec, _MM_SHUFFLE(0, 3, 2, 1));
+                    nearby_vys_vec  = _mm256_shuffle_ps(nearby_vys_vec, nearby_vys_vec, _MM_SHUFFLE(0, 3, 2, 1));
+
+                    CALC_AVG
+                }
+                */
             }
         }
 
