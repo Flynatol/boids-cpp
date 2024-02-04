@@ -23,12 +23,11 @@
 std::ofstream myfile;
 
 const float TRIANGLE_SIZE = 5.f;
-const uint32_t NUM_BOIDS = 1000000;
 const uint16_t SIGHT_RANGE = 100;
 
 #define FRAME_RATE_LIMIT 165
 #define WORLD_SIZE_MULT 25
-#define NUM_THREADS 16
+#define NUM_THREADS 7
 #define USE_MULTICORE 
 
 static const Vector2 triangle[3] = {
@@ -42,9 +41,6 @@ static const Vector2 triangle[3] = {
 #define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
 
 typedef int32_t Boid;
-
-const int screen_width = 2560;
-const int screen_height = 1440;
 
 struct PerfMonitor {
     int tick_counter = 0;
@@ -177,6 +173,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
 
     //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
 
+    //An array that tells us the index that that the looked up boid should be written to in the new array
     Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid));
 
     int counter = 0;
@@ -205,40 +202,57 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     auto t_end = std::chrono::high_resolution_clock::now();
 }
 
+inline void place_boid(const BoidMap& map, const BoidList& boid_list, Boid boid_to_place) {
+    Boid map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]);
+    Boid old_head = map.m_boid_map[map_pos];
+    map.m_boid_map[map_pos] = boid_to_place;
+    boid_list.m_boid_store->index_next[boid_to_place] = old_head;
+    boid_list.m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list.m_boid_store->depth[old_head] + 1 : 1;
+}
 
-void populate_map(BoidList& boid_list, BoidMap& map) {
+void block_populate(int thread_start_pos, const BoidList *boid_list, const BoidMap *boid_map) {
+    for (int i = 0; i < (boid_list->m_size) / NUM_THREADS; i++) {
+        place_boid(*boid_map, *boid_list, thread_start_pos + i);
+    }
+}
+
+
+void populate_map(BoidList& boid_list, BoidMap& boid_map) {
     
-    //for (int i = 0; i < map.m_xsize * map.m_ysize; i++) {
-    //    map.m_boid_map[i] = -1;
-    //}
-
-    memset(map.m_boid_map, -1, sizeof(Boid) * map.m_xsize * map.m_ysize);
+    memset(boid_map.m_boid_map, -1, sizeof(Boid) * boid_map.m_xsize * boid_map.m_ysize);
 
     //TODO: slight problem here is that we are WILL reverse the memory positions in each cell each update.
     //Maybe we can fix this writing into the new list in reverse order in the rebuild list function (Use the depth to work out correct positions).
     //Or we can fix this by building our linked list s.t. the first boid we find in a cell will stay as the head.
     //This would be performance intensive.
     
+    /*
     for (Boid boid_to_place = 0; boid_to_place < boid_list.m_size; boid_to_place++) {
-        Boid map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]);
-        Boid old_head = map.m_boid_map[map_pos];
-        map.m_boid_map[map_pos] = boid_to_place;
+        Boid map_pos = boid_map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]);
+        Boid old_head = boid_map.m_boid_map[map_pos];
+        boid_map.m_boid_map[map_pos] = boid_to_place;
         boid_list.m_boid_store->index_next[boid_to_place] = old_head;
         boid_list.m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list.m_boid_store->depth[old_head] + 1 : 1;
-    }
-    
-    /*
-    for (Boid boid_to_place = boid_list.m_size; boid_to_place > 0; boid_to_place--) {
-        int map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place - 1], boid_list.m_boid_store->ys[boid_to_place - 1]);
-        Boid old_head = map.m_boid_map[map_pos];
-        map.m_boid_map[map_pos] = boid_to_place - 1;
-        boid_list.m_boid_store->index_next[boid_to_place - 1] = old_head;
-        boid_list.m_boid_store->depth[boid_to_place - 1] = (old_head != -1) * boid_list.m_boid_store->depth[old_head] + 1;
     }
     */
 
    // To parallelize this we could use an array of mutexs to represent to the head of each map cell
    // If we put distant rows on each thread unlikely to have waiting.
+
+   //Alternatively as no boid can move more than one grid square in a tick we could work in different rows spaced out by a couple rows
+   //Alternatively alternatively we can just space out a lot and hope. (this probably isn't as terrible as it sounds) 
+
+   std::thread threads[NUM_THREADS];
+    
+    for (int i = 0; i < NUM_THREADS; i++) {
+        int num = i * (boid_list.m_size / NUM_THREADS);
+        threads[i] = std::thread(block_populate, num, &boid_list, &boid_map);
+    }
+    
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads[i].join();
+    }
+    
 }
 
 
@@ -271,7 +285,7 @@ inline __m256 vector_sum(__m256 v) {
 }
 
 
-static Mesh GenMeshCustom(void)
+static Mesh GenMeshCustom()
 {
     Mesh mesh = { 0 };
     mesh.triangleCount = 1;
@@ -486,6 +500,7 @@ inline void update_cell(const BoidMap& map, const int x, const int y, const Rule
     }
 }
 
+/*
 #define CALC_AVG                       \
         { \
         const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);\
@@ -505,8 +520,28 @@ inline void update_cell(const BoidMap& map, const int x, const int y, const Rule
         avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); \
         isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); \
         }
+*/
 
-
+/*
+inline void calc_avg(__m256& current_xs_vec, __m256& current_ys_vec, __m256& nearby_xs_vec, __m256& nearby_ys_vec, __m256& srs_vec, __m256& ads_vec, __m256& sep_x_vec, __m256& sep_y_vec) {
+    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
+    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
+    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
+    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS);       
+    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);        
+    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask);         
+    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.)); 
+    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec); 
+    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds); 
+    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))); 
+    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))); 
+    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec); 
+    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec); 
+    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec); 
+    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); 
+    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); 
+}
+*/
 inline void update_cell2(const BoidMap *map, const int x, const int y, const Rules *rules, const BoidList *boid_list) {
     const auto world_height = map->m_cell_size * map->m_ysize;
     const auto world_width = map->m_cell_size * map->m_xsize;
@@ -573,7 +608,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     //test_vec = _mm256_permutevar8x32_ps(test_vec, _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0));
                     //test_vec = _mm256_shuffle_ps(test_vec, test_vec, _MM_SHUFFLE(0, 3, 2, 1));
                     
-                    
+                
                     //Do some stuff                    
                     const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
                     const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
@@ -616,6 +651,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                 }
                 /*
+                
                 //Do stuff
                 CALC_AVG
                 
@@ -649,6 +685,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     CALC_AVG
                 }
                 */
+                
             }
         }
 
@@ -968,7 +1005,7 @@ void block_runner(int thread_num, bool offset, const BoidMap *boid_map, const Ru
 }
 
 //Stripes allocations to each thread (hopefully more cache local)
-inline void jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+inline void  jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int y = thread_num * 2 + offset; y < boid_map->m_ysize; y += 2 * NUM_THREADS) {
         for (int x = 0; x < boid_map->m_xsize; x++) {
             update_cell2(boid_map, x, y, rules, boid_list);
@@ -1034,9 +1071,14 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
 }
 
 
-int main () {
-    InitWindow(screen_width, screen_height, "RayLib Boids!");
+int main (int argc, char* argv[]) {
+    uint32_t num_boids = atoi(argv[1]);
+
+    InitWindow(0, 0, "RayLib Boids!");
     SetTargetFPS(FRAME_RATE_LIMIT);
+
+    const int screen_width = GetScreenWidth();
+    const int screen_height = GetScreenHeight();
 
     SetTraceLogLevel(LOG_ALL);
     TraceLog(LOG_DEBUG, TextFormat("Boid size is: %d bytes", sizeof(Boid)));
@@ -1064,7 +1106,7 @@ int main () {
     matInstances.shader = boid_shader;
     matInstances.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
-    BoidList boid_list(NUM_BOIDS);
+    BoidList boid_list(num_boids);
 
     Rules rules = {
         .avoid_distance_squared = 1000.f,
@@ -1088,8 +1130,8 @@ int main () {
 
     myfile.open("log.log");
 
-    int world_width = screen_width * WORLD_SIZE_MULT;
-    int world_height = screen_height * WORLD_SIZE_MULT;
+    const int world_width = screen_width * WORLD_SIZE_MULT;
+    const int world_height = screen_height * WORLD_SIZE_MULT;
 
     Camera2D cam = { 0 };
     cam.zoom = static_cast<float>(screen_width) / world_width;
@@ -1140,7 +1182,6 @@ int main () {
     auto vys = boid_list.m_boid_store->vys;
     auto homes = boid_list.m_boid_store->homes;
     auto index_nexts = boid_list.m_boid_store->index_next;
-
     
 
     while (WindowShouldClose() == false){  
@@ -1227,7 +1268,7 @@ int main () {
             auto t_start_3d = std::chrono::high_resolution_clock::now();
 
             BeginMode3D(camera);
-                DrawMeshInstanced2(tri, matInstances, NUM_BOIDS, boid_list.m_boid_store->xs, boid_list.m_boid_store->ys, boid_list.m_boid_store->vxs, boid_list.m_boid_store->vys);
+                DrawMeshInstanced2(tri, matInstances, num_boids, boid_list.m_boid_store->xs, boid_list.m_boid_store->ys, boid_list.m_boid_store->vxs, boid_list.m_boid_store->vys);
             EndMode3D();
 
             auto t_end_3d = std::chrono::high_resolution_clock::now();
