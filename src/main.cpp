@@ -27,7 +27,7 @@ const uint16_t SIGHT_RANGE = 100;
 
 #define FRAME_RATE_LIMIT 165
 #define WORLD_SIZE_MULT 25
-#define NUM_THREADS 7
+#define NUM_THREADS 15
 #define USE_MULTICORE 
 
 static const Vector2 triangle[3] = {
@@ -196,6 +196,8 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
         threads[i].join();
     }
     
+    free(index_buffer);
+
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
 
