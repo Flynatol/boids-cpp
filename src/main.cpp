@@ -19,6 +19,7 @@
 #include "boidmap.h"
 #include "ui.h"
 #include <thread>
+#include <future>
 
 std::ofstream myfile;
 
@@ -27,6 +28,7 @@ const uint16_t SIGHT_RANGE = 100;
 
 #define FRAME_RATE_LIMIT 165
 #define WORLD_SIZE_MULT 25
+//#define BOID_DENSITY_MAGIC_NUMBER todo
 #define NUM_THREADS 15
 #define USE_MULTICORE 
 
@@ -39,6 +41,9 @@ static const Vector2 triangle[3] = {
 //#define DEBUG(...) myfile << TextFormat(__VA_ARGS__) << '\n';
 //#define DEBUG(...) ;
 #define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
+//#define DEBUG(...)
+
+
 
 typedef int32_t Boid;
 
@@ -127,6 +132,7 @@ void jump_writer(int thread_start_pos, const Boid* index_buffer, const BoidList 
     }
 }
 
+//std::future<void> render_task
 void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     auto t_start = std::chrono::high_resolution_clock::now();
     BoidStore *main_buffer = boid_list.m_boid_store;
@@ -166,6 +172,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
 
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
+
     */
     // NEW PLAN
     // ONE PASS to store index to write to in new list for each cell
@@ -174,7 +181,9 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
 
     //An array that tells us the index that that the looked up boid should be written to in the new array
-    Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid));
+    Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid)); //Weirdly this seems to be the fastest of the following options
+    //Boid *index_buffer = boid_map.m_index_buffer;
+    //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
 
     int counter = 0;
     for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
@@ -185,15 +194,20 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
 
     auto t_mid = std::chrono::high_resolution_clock::now();
 
+    //std::vector<std::future<void>> pool;
+    //pool.resize(NUM_THREADS);
+
     std::thread threads[NUM_THREADS];
     
     for (int i = 0; i < NUM_THREADS; i++) {
         int num = i * ((boid_map.m_xsize * boid_map.m_ysize) / NUM_THREADS);
-        threads[i] = std::thread(block_writer, num, index_buffer, &boid_list, &boid_map);
+        threads[i] = std::thread(block_writer, num, (Boid *) index_buffer, &boid_list, &boid_map);
+        //pool[i] = std::async(std::launch::async, block_writer, num, (Boid *) index_buffer, &boid_list, &boid_map);
     }
     
     for (int i = 0; i < NUM_THREADS; i++) {
         threads[i].join();
+        //pool[i].wait();
     }
     
     free(index_buffer);
@@ -238,21 +252,23 @@ void populate_map(BoidList& boid_list, BoidMap& boid_map) {
     }
     */
 
-   // To parallelize this we could use an array of mutexs to represent to the head of each map cell
-   // If we put distant rows on each thread unlikely to have waiting.
+    // To parallelize this we could use an array of mutexs to represent to the head of each map cell
+    // If we put distant rows on each thread unlikely to have waiting.
 
-   //Alternatively as no boid can move more than one grid square in a tick we could work in different rows spaced out by a couple rows
-   //Alternatively alternatively we can just space out a lot and hope. (this probably isn't as terrible as it sounds) 
+    //Alternatively as no boid can move more than one grid square in a tick we could work in different rows spaced out by a couple rows
+    //Alternatively alternatively we can just space out a lot and hope. (this probably isn't as terrible as it sounds) 
 
-   std::thread threads[NUM_THREADS];
+    //std::thread threads[NUM_THREADS];
+    std::vector<std::future<void>> pool;
+    pool.resize(NUM_THREADS);
     
     for (int i = 0; i < NUM_THREADS; i++) {
         int num = i * (boid_list.m_size / NUM_THREADS);
-        threads[i] = std::thread(block_populate, num, &boid_list, &boid_map);
+        pool[i] = std::async(std::launch::async, block_populate, num, &boid_list, &boid_map);
     }
     
     for (int i = 0; i < NUM_THREADS; i++) {
-        threads[i].join();
+        pool[i].wait();
     }
     
 }
@@ -273,9 +289,9 @@ void debug_vector(U vector, const char* format) {
 }
 
 inline __m256i vector_sum(__m256i v) {
-    auto temp = _mm256_hadd_epi32(v, v);
+    __m256i temp = _mm256_hadd_epi32(v, v);
     temp = _mm256_hadd_epi32(temp, temp);
-    auto fliptemp = (__m256i) _mm256_permute2f128_ps((__m256) temp, (__m256) temp, 1);
+    __m256i fliptemp = (__m256i) _mm256_permute2f128_ps((__m256) temp, (__m256) temp, 1);
     return _mm256_add_epi32(temp, fliptemp);
 }
 
@@ -1006,8 +1022,15 @@ void block_runner(int thread_num, bool offset, const BoidMap *boid_map, const Ru
     }
 }
 
+//Allocates rows in blocks to each thread
+void block_runner_unstable(int y, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+    for (int x = 0; x < boid_map->m_xsize; x++) {
+        update_cell2(boid_map, x, y, rules, boid_list);
+    }
+}
+
 //Stripes allocations to each thread (hopefully more cache local)
-inline void  jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+inline void jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int y = thread_num * 2 + offset; y < boid_map->m_ysize; y += 2 * NUM_THREADS) {
         for (int x = 0; x < boid_map->m_xsize; x++) {
             update_cell2(boid_map, x, y, rules, boid_list);
@@ -1015,6 +1038,24 @@ inline void  jump_runner(int thread_num, bool offset, const BoidMap *boid_map, c
     }
 }
 
+inline void async_runner(int y, std::future<void> *pool, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
+    if (y % 2 != 0) {
+        pool[y-1].wait();
+        pool[y+1].wait();
+    }
+
+    for (int x = 0; x < boid_map->m_xsize; x++) {
+        update_cell2(boid_map, x, y, rules, boid_list);
+    }
+}
+
+__thread volatile int you_shall_not_optimize_this;
+
+void work() {
+    // This is the simplest way I can think of to prevent the compiler and
+    // operating system from doing naughty things
+    you_shall_not_optimize_this = 42;
+}
 
 void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
     auto t_start = std::chrono::high_resolution_clock::now();
@@ -1042,6 +1083,12 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
 
     std::thread threads[NUM_THREADS];
 
+    //Async is currently slower than my threading implementation
+
+    #define USE_ASYNC
+
+    #ifndef USE_ASYNC
+
     for (int i = 0; i < NUM_THREADS; i++) {
         //block_runner(i, false, &boid_map, &rules, &boid_list);
         threads[i] = std::thread(jump_runner, i, false, &boid_map, &rules, &boid_list);
@@ -1060,6 +1107,43 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
     for (int i = 0; i < NUM_THREADS; i++) {
         threads[i].join();
     }
+    #endif
+
+    /*
+    for (int i = 0; i < NUM_THREADS; i++) {
+        //block_runner(i, true, &boid_map, &rules, &boid_list);
+        threads[i] = std::thread(block_runner_unstable, i, &boid_map, &rules, &boid_list);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads[i].join();
+    }
+    */
+
+    #ifdef USE_ASYNC
+    
+    std::vector<std::future<void>> pool;
+    pool.resize(NUM_THREADS);
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pool[i] = std::async(std::launch::async, jump_runner, i, false, &boid_map, &rules, &boid_list);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pool[i].wait();
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pool[i] = std::async(std::launch::async, jump_runner, i, true, &boid_map, &rules, &boid_list);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pool[i].wait();
+    }
+    
+
+    #endif
+
 
     #endif
     
@@ -1070,6 +1154,50 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
     auto t_end = std::chrono::high_resolution_clock::now();
 
     TraceLog(LOG_DEBUG, TextFormat("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count()));
+}
+
+void render(BoidList *boid_list, Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
+    BeginDrawing();
+        ClearBackground(BLACK);
+
+        auto t_start_3d = std::chrono::high_resolution_clock::now();
+        //We could cull here by offsetting the start pointers by some amount
+        int offset = 0;
+        BeginMode3D(camera);
+            DrawMeshInstanced2(*tri, *matInstances, boid_list->m_size - offset, boid_list->m_boid_store->xs + offset, boid_list->m_boid_store->ys + offset, boid_list->m_boid_store->vxs + offset, boid_list->m_boid_store->vys + offset);
+        EndMode3D();
+
+        auto t_end_3d = std::chrono::high_resolution_clock::now();
+
+        //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
+        /*
+        BeginMode2D(cam);
+            Boid current = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
+            while (current != -1) {
+                rlPushMatrix();
+                    rlTranslatef(xs[current], ys[current], 0);
+                    float angle = (atan2(vxs[current], vys[current]) * 360.) / (2 * PI);
+                    rlRotatef(angle, 0, 0, -1);
+                    DrawTriangle(triangle[2], triangle[1], triangle[0], BLUE);
+                rlPopMatrix();
+
+                current = index_nexts[current];
+            }        
+
+            if (rules.show_lines) {
+                //Draw grid
+                for (int y = 0; y < boid_map.m_ysize; y++) {
+                    DrawLine(0, y*boid_map.m_cell_size, boid_map.m_xsize*boid_map.m_cell_size, y*boid_map.m_cell_size, GRAY);
+                }
+                for (int x = 0; x < boid_map.m_xsize; x++) {
+                    DrawLine(x*boid_map.m_cell_size, 0, x*boid_map.m_cell_size, boid_map.m_ysize * boid_map.m_cell_size, GRAY);
+                }
+            }
+        EndMode2D();
+        */
+        ui->Render(cam, camera, rules);
+
+    EndDrawing();
 }
 
 
@@ -1139,10 +1267,10 @@ int main (int argc, char* argv[]) {
     cam.zoom = static_cast<float>(screen_width) / world_width;
 
     Camera camera = {
-        .position = (Vector3){world_width/2., 200., world_height/2},            
-        .target = (Vector3){world_width/2, 0.0f, world_height/2},                
+        .position = (Vector3){world_width/2.f, 200.f, world_height/2.f},            
+        .target = (Vector3){world_width/2.f, 0.0f, world_height/2.f},                
         .up = (Vector3){ 0.0f, 0.0f, -1.0f },                    
-        .fovy = world_height,                                          
+        .fovy = (float) world_height,                                          
         .projection = CAMERA_ORTHOGRAPHIC,                      
     };
 
@@ -1192,8 +1320,6 @@ int main (int argc, char* argv[]) {
         auto t_mid = std::chrono::high_resolution_clock::now();
         rebuild_list(boid_list, boid_map);
         auto t_end = std::chrono::high_resolution_clock::now();
-
-        DEBUG("Populate :%0.12f, rebuild: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count());
 
         xs = boid_list.m_boid_store->xs;
         ys = boid_list.m_boid_store->ys;
@@ -1263,14 +1389,28 @@ int main (int argc, char* argv[]) {
             selected_boid = nearest;
         }                
         */
+        auto t_start_drawing = std::chrono::high_resolution_clock::now();
 
+        render(&boid_list, &ui, rules, cam, camera, &tri, &matInstances);
+
+        //auto test = std::async(std::launch::async, render, &boid_list, &ui, rules, cam, camera, &tri, &matInstances);
+        //auto test2 = std::thread(render, &boid_list, &ui, rules, cam, camera, &tri, &matInstances);
+        
+        //test2.join();
+
+
+
+
+        //DEBUG("test");
+        /*
         BeginDrawing();
             ClearBackground(BLACK);
 
             auto t_start_3d = std::chrono::high_resolution_clock::now();
-
+            //We could cull here by offsetting the start pointers by some amount
+            int offset = 0;
             BeginMode3D(camera);
-                DrawMeshInstanced2(tri, matInstances, num_boids, boid_list.m_boid_store->xs, boid_list.m_boid_store->ys, boid_list.m_boid_store->vxs, boid_list.m_boid_store->vys);
+                DrawMeshInstanced2(tri, matInstances, num_boids - offset, boid_list.m_boid_store->xs + offset, boid_list.m_boid_store->ys + offset, boid_list.m_boid_store->vxs + offset, boid_list.m_boid_store->vys + offset);
             EndMode3D();
 
             auto t_end_3d = std::chrono::high_resolution_clock::now();
@@ -1304,6 +1444,10 @@ int main (int argc, char* argv[]) {
             ui.Render(cam, camera, rules);
 
         EndDrawing();
+        */
+        auto t_end_drawing = std::chrono::high_resolution_clock::now();
+        DEBUG("Populate :%0.6f, rebuild: %0.6f, render: %0.6f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count(), std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count());
+
     }
 
     CloseWindow();
@@ -1425,4 +1569,114 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     rlUnloadVertexBuffer(instances_boid_y_ID);
     rlUnloadVertexBuffer(instances_boid_vx_ID);
     rlUnloadVertexBuffer(instances_boid_vy_ID);
+}
+
+
+enum TaskType {
+    TEST_TASK1,
+    TEST_TASK2,
+    TEST_TASK3,
+    UPDATE_BOIDS,
+};
+
+void function1() {
+    DEBUG("Function 1 executed");
+}
+
+void function2() {
+    DEBUG("Function 2 executed");
+}
+
+void function3() {
+    DEBUG("Function 3 executed");
+}
+
+struct ThreadData {
+    const BoidMap *boid_map;
+    const Rules *rules;
+    const BoidList *boid_list;
+};
+
+struct Task {
+    TaskType task_type;
+    void *argument_struct;
+    int *task_counter;
+};
+
+struct UpdateArgs {
+    int thread_num;
+    bool offset;
+};
+
+typedef volatile int spinlock_t; 
+
+void lock(spinlock_t* lock) {
+    while (__sync_lock_test_and_set(lock, 1)) {}
+}
+
+void unlock(spinlock_t* lock) {
+    __sync_synchronize();
+    *lock = 0;
+}
+
+struct TaskMaster {
+    uint8_t front;
+    uint8_t back;
+
+    Task task_buffer[256];
+
+    spinlock_t lock;
+};
+
+Task getTask(TaskMaster *task_master) {
+    Task task;
+
+    //This should hang until a task is available
+    try_lock:
+
+    //Aquire front lock
+    lock(&task_master->lock);
+        //Critical region
+        //If there is a task available
+        if(task_master->front != task_master->back) {
+            task = task_master->task_buffer[task_master->front];
+            task_master->lock += 1;
+        } else {
+            //Release lock, yeild jump to front of block
+            //Yes I'm using goto. -- It reduces the number of expressions being evaluated, and makes this code clearer (IMO).
+            unlock(&task_master->lock);
+            std::this_thread::yield();
+            goto try_lock;
+        }
+
+    unlock(&task_master->lock);
+
+    //Return the actual task, because after this point the allocation in the array may be deleted (and they're very small memory wise)
+    return task;
+}
+
+void runner(TaskMaster *task_master, ThreadData thread_data) {
+
+    //Wait for task
+    Task current_task = getTask(task_master);
+
+    // Test case switch and function pointers
+    switch (current_task.task_type) {
+        case TaskType::TEST_TASK1:
+            function1();
+            break;
+        
+        case TaskType::TEST_TASK2:
+            function2();
+            break;
+
+        case TaskType::TEST_TASK3:
+            function3();
+            break;
+
+        case TaskType::UPDATE_BOIDS:
+            auto cast_args = (UpdateArgs *) current_task.argument_struct;
+            jump_runner(cast_args->thread_num, cast_args->offset, thread_data.boid_map, thread_data.rules, thread_data.boid_list);
+            break;
+    }
 }
