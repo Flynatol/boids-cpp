@@ -24,6 +24,8 @@ struct Lock {
     }
 };
 
+//typedef std::mutex Lock;
+
 struct TaskMaster;
 
 struct TaskSync {
@@ -67,6 +69,8 @@ struct TaskMaster {
         //This should hang until a task is available
         try_lock:
 
+        //while (!ts_task_buffer.unsafe_not_empty()) {}
+
         //Aquire front lock
         this->lock.lock();
             if (!(this->ts_task_buffer.pop_front(task))) {
@@ -90,7 +94,7 @@ struct TaskMaster {
         lock.lock();
         for (int i = 0; i < NUM_THREADS; i++) {
             ts_task_buffer.push_back(
-                Task {.task_type = TaskType::STOP}
+                Task { .task_type = TaskType::STOP }
             );
         }
         lock.unlock();

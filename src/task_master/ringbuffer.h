@@ -24,6 +24,11 @@ public:
         }
         return result;
     }
+
+    inline bool unsafe_not_empty() {
+        size_t next = (head + 1) % capacity;
+        return (next != tail);
+    }
  
     // Get an item if there are any
     //  Returns true if succesful

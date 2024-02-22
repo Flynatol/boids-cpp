@@ -30,8 +30,7 @@ const float TRIANGLE_SIZE = 5.f;
 const uint16_t SIGHT_RANGE = 100;
 
 #define FRAME_RATE_LIMIT 165
-#define WORLD_SIZE_MULT 25
-//#define BOID_DENSITY_MAGIC_NUMBER todo
+#define BOID_DENSITY_MAGIC_NUMBER 2304.0
 #define USE_MULTICORE 
 
 static const Vector2 triangle[3] = {
@@ -42,9 +41,8 @@ static const Vector2 triangle[3] = {
 
 //#define DEBUG(...) myfile << TextFormat(__VA_ARGS__) << '\n';
 //#define DEBUG(...) ;
-//#define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
-#define DEBUG(...)
-
+#define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
+//#define DEBUG(...)
 
 
 typedef int32_t Boid;
@@ -90,7 +88,13 @@ void write_map_to_list(int i, const Boid* index_buffer, const BoidList *boid_lis
 }
 
 void block_writer(int thread_start_pos, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
-    for (int i = 0; i < (boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS; i++) {
+    auto t = thread_start_pos == ((NUM_THREADS - 1) * ((boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS));
+    auto correction = (boid_map->m_xsize * boid_map->m_ysize) - (thread_start_pos + ((boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS));
+
+    t = false;
+    if (t) DEBUG("correction");
+
+    for (int i = 0; i < (boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS + t * correction; i++) {
         write_map_to_list(thread_start_pos + i, index_buffer, boid_list, boid_map);
     }
 }
@@ -104,8 +108,10 @@ void jump_writer(int thread_start_pos, const Boid* index_buffer, const BoidList 
 //std::future<void> render_task
 void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     auto t_start = std::chrono::high_resolution_clock::now();
+
     BoidStore *main_buffer = boid_list.m_boid_store;
     BoidStore *back_buffer = boid_list.m_backbuffer;
+    
     /*
     int index = 0;
     //Go through every cell in the map (find every head node)
@@ -142,8 +148,8 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
 
+    return;
     */
-
 
     // NEW PLAN
     // ONE PASS to store index to write to in new list for each cell
@@ -198,7 +204,13 @@ inline void place_boid(const BoidMap& map, const BoidList& boid_list, Boid boid_
 }
 
 void block_populate(int thread_start_pos, const BoidList *boid_list, const BoidMap *boid_map) {
-    for (int i = 0; i < (boid_list->m_size) / NUM_THREADS; i++) {
+    //TODO work out a better fix for this
+    //We need to work out a better way to allocate work between threads
+
+    auto t = thread_start_pos == ((NUM_THREADS - 1) * (boid_list->m_size / NUM_THREADS));
+    auto correction = boid_list->m_size - (thread_start_pos + (boid_list->m_size / NUM_THREADS));
+    
+    for (int i = 0; i < (boid_list->m_size) / NUM_THREADS + correction * t; i++) {
         place_boid(*boid_map, *boid_list, thread_start_pos + i);
     }
 }
@@ -221,6 +233,8 @@ void populate_map(BoidList& boid_list, BoidMap& boid_map) {
         boid_list.m_boid_store->index_next[boid_to_place] = old_head;
         boid_list.m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list.m_boid_store->depth[old_head] + 1 : 1;
     }
+
+    return;
     */
 
     // To parallelize this we could use an array of mutexs to represent to the head of each map cell
@@ -955,7 +969,6 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
         vxs[boid] += dx * rules->homing;
         vys[boid] += dy * rules->homing;
 
-          
         xs[boid] += vxs[boid];
         ys[boid] += vys[boid];        
     }
@@ -1318,8 +1331,10 @@ int main (int argc, char* argv[]) {
 
     myfile.open("log.log");
 
-    const int world_width = screen_width * WORLD_SIZE_MULT;
-    const int world_height = screen_height * WORLD_SIZE_MULT;
+    const uint32_t world_size_mult = std::ceil(sqrt( (BOID_DENSITY_MAGIC_NUMBER / ((double)screen_height)) * ((double) num_boids / (double) screen_width)));
+
+    const int world_width = screen_width * world_size_mult;
+    const int world_height = screen_height * world_size_mult;
 
     Camera2D cam = { 0 };
     cam.zoom = static_cast<float>(screen_width) / world_width;
@@ -1371,7 +1386,6 @@ int main (int argc, char* argv[]) {
     auto homes = boid_list.m_boid_store->homes;
     auto index_nexts = boid_list.m_boid_store->index_next;
     
-    
     row_runner_args args[boid_map.m_ysize];
     
     for (uint32_t i = 0; i < boid_map.m_ysize; i++) {
@@ -1401,21 +1415,24 @@ int main (int argc, char* argv[]) {
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
         SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
 
+        
         //update_boids(boid_map, rules, boid_list);
+
         auto t_update_start = std::chrono::high_resolution_clock::now();
 
-        
         TaskMaster task_master;
         TaskSync sync;
         task_master.start_threads();
 
         update_boids2(boid_map, args, &task_master, &sync);
 
+
+        //update_non_interacting2(&boid_map, &rules, &boid_list);
         auto t_update_mid = std::chrono::high_resolution_clock::now();
         
         auto t_update_end = std::chrono::high_resolution_clock::now();
 
-        DEBUG("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_update_mid-t_update_start).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_mid).count());
+        //DEBUG("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_update_mid-t_update_start).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_mid).count());
 
         //TODO move camera stuff to class
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)){
@@ -1439,8 +1456,8 @@ int main (int argc, char* argv[]) {
     
             cam.zoom += wheel * 0.125f;
         
-            if (cam.zoom < (1./WORLD_SIZE_MULT))
-                cam.zoom = (1./WORLD_SIZE_MULT);
+            if (cam.zoom < (1./world_size_mult))
+                cam.zoom = (1./world_size_mult);
 
             camera.fovy = screen_height / cam.zoom;
 
@@ -1473,7 +1490,6 @@ int main (int argc, char* argv[]) {
         }                
         */
         auto t_start_drawing = std::chrono::high_resolution_clock::now();
-
         render(&boid_list, &ui, rules, cam, camera, &tri, &matInstances);
 
         //auto test = std::async(std::launch::async, render, &boid_list, &ui, rules, cam, camera, &tri, &matInstances);
@@ -1528,10 +1544,13 @@ int main (int argc, char* argv[]) {
 
         EndDrawing();
         */
+        
         sync.wait();
+        task_master.join_all();
+
+
         auto t_end_drawing = std::chrono::high_resolution_clock::now();
         DEBUG("Populate :%0.6f, rebuild: %0.6f, render: %0.6f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count(), std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count());
-        task_master.join_all();
     }
 
     CloseWindow();
