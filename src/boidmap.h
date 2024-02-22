@@ -11,6 +11,7 @@ class BoidMap {
         int m_xsize;
         int m_cell_size; 
         Boid *m_boid_map;
+        Boid *m_index_buffer;
 
     public:
         BoidMap() = delete;

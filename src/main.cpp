@@ -12,14 +12,17 @@
 #include <chrono>
 #include <immintrin.h>
 #include <fstream>
+#include <thread>
+#include <future>
 
 #define NO_FONT_AWESOME
 
 #include "boidlist.h"
 #include "boidmap.h"
 #include "ui.h"
-#include <thread>
-#include <future>
+#include ".\task_master\taskmaster.h"
+#include ".\task_master\tm_shared.h"
+
 
 std::ofstream myfile;
 
@@ -56,39 +59,6 @@ struct PerfMonitor {
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
 
 void write_map_to_list(int i, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
-    auto main_buffer = boid_list->m_boid_store;
-    auto back_buffer = boid_list->m_backbuffer;
-
-    int index = index_buffer[i];
-    Boid current = boid_map->get_absolute(i);
-
-    if (current != -1) {
-        boid_map->m_boid_map[i] = index;
-    }
-    
-    while (current != -1) {
-        back_buffer->xs[index] = main_buffer->xs[current];
-        back_buffer->ys[index] = main_buffer->ys[current];
-        back_buffer->vxs[index] = main_buffer->vxs[current];
-        back_buffer->vys[index] = main_buffer->vys[current];
-        back_buffer->homes[index] = main_buffer->homes[current];
-        back_buffer->depth[index] = main_buffer->depth[current];
-
-        Boid next = main_buffer->index_next[current];
-        
-        if (next != -1) {
-            back_buffer->index_next[index] = index + 1;
-        } else {
-            back_buffer->index_next[index] = -1;
-        }
-        
-        current = next;
-        index++;
-    }
-}
-
-//TODO rewrite this s.t. it writes boids in reverse order 
-void write_map_to_list_back(int i, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
     auto main_buffer = boid_list->m_boid_store;
     auto back_buffer = boid_list->m_backbuffer;
 
@@ -174,6 +144,8 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     boid_list.m_backbuffer = main_buffer;
 
     */
+
+
     // NEW PLAN
     // ONE PASS to store index to write to in new list for each cell
     // THEN USE MT to update the list from many points at once.
@@ -1162,9 +1134,10 @@ void render(BoidList *boid_list, Ui *ui, Rules &rules, Camera2D cam, Camera3D ca
 
         auto t_start_3d = std::chrono::high_resolution_clock::now();
         //We could cull here by offsetting the start pointers by some amount
+        auto const boid_store = boid_list->m_backbuffer;
         int offset = 0;
         BeginMode3D(camera);
-            DrawMeshInstanced2(*tri, *matInstances, boid_list->m_size - offset, boid_list->m_boid_store->xs + offset, boid_list->m_boid_store->ys + offset, boid_list->m_boid_store->vxs + offset, boid_list->m_boid_store->vys + offset);
+            DrawMeshInstanced2(*tri, *matInstances, boid_list->m_size - offset, boid_store->xs + offset, boid_store->ys + offset, boid_store->vxs + offset, boid_store->vys + offset);
         EndMode3D();
 
         auto t_end_3d = std::chrono::high_resolution_clock::now();
@@ -1569,114 +1542,4 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     rlUnloadVertexBuffer(instances_boid_y_ID);
     rlUnloadVertexBuffer(instances_boid_vx_ID);
     rlUnloadVertexBuffer(instances_boid_vy_ID);
-}
-
-
-enum TaskType {
-    TEST_TASK1,
-    TEST_TASK2,
-    TEST_TASK3,
-    UPDATE_BOIDS,
-};
-
-void function1() {
-    DEBUG("Function 1 executed");
-}
-
-void function2() {
-    DEBUG("Function 2 executed");
-}
-
-void function3() {
-    DEBUG("Function 3 executed");
-}
-
-struct ThreadData {
-    const BoidMap *boid_map;
-    const Rules *rules;
-    const BoidList *boid_list;
-};
-
-struct Task {
-    TaskType task_type;
-    void *argument_struct;
-    int *task_counter;
-};
-
-struct UpdateArgs {
-    int thread_num;
-    bool offset;
-};
-
-typedef volatile int spinlock_t; 
-
-void lock(spinlock_t* lock) {
-    while (__sync_lock_test_and_set(lock, 1)) {}
-}
-
-void unlock(spinlock_t* lock) {
-    __sync_synchronize();
-    *lock = 0;
-}
-
-struct TaskMaster {
-    uint8_t front;
-    uint8_t back;
-
-    Task task_buffer[256];
-
-    spinlock_t lock;
-};
-
-Task getTask(TaskMaster *task_master) {
-    Task task;
-
-    //This should hang until a task is available
-    try_lock:
-
-    //Aquire front lock
-    lock(&task_master->lock);
-        //Critical region
-        //If there is a task available
-        if(task_master->front != task_master->back) {
-            task = task_master->task_buffer[task_master->front];
-            task_master->lock += 1;
-        } else {
-            //Release lock, yeild jump to front of block
-            //Yes I'm using goto. -- It reduces the number of expressions being evaluated, and makes this code clearer (IMO).
-            unlock(&task_master->lock);
-            std::this_thread::yield();
-            goto try_lock;
-        }
-
-    unlock(&task_master->lock);
-
-    //Return the actual task, because after this point the allocation in the array may be deleted (and they're very small memory wise)
-    return task;
-}
-
-void runner(TaskMaster *task_master, ThreadData thread_data) {
-
-    //Wait for task
-    Task current_task = getTask(task_master);
-
-    // Test case switch and function pointers
-    switch (current_task.task_type) {
-        case TaskType::TEST_TASK1:
-            function1();
-            break;
-        
-        case TaskType::TEST_TASK2:
-            function2();
-            break;
-
-        case TaskType::TEST_TASK3:
-            function3();
-            break;
-
-        case TaskType::UPDATE_BOIDS:
-            auto cast_args = (UpdateArgs *) current_task.argument_struct;
-            jump_runner(cast_args->thread_num, cast_args->offset, thread_data.boid_map, thread_data.rules, thread_data.boid_list);
-            break;
-    }
 }
