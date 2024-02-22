@@ -6,7 +6,25 @@
 #include "ringbuffer.h"
 #include "tm_shared.h"
 
-typedef std::mutex Lock;
+#define NUM_THREADS 4
+
+typedef volatile int spinlock_t;
+
+struct Lock {
+    spinlock_t lock_internal;
+
+    void lock() {
+        //Should probably try and avoid using these legacy built-ins
+        while (__sync_lock_test_and_set(&lock_internal, 1)) {}
+    }
+
+    void unlock() {
+        __sync_synchronize();
+        lock_internal = 0;
+    }
+};
+
+struct TaskMaster;
 
 struct TaskSync {
     Lock tc_lock;
@@ -25,22 +43,25 @@ struct TaskSync {
 
 struct Task {
     TaskType task_type;
-    void *argument_struct;
+    void *argument_struct = NULL;
 
-    TaskSync *sync;
+    TaskSync *sync = NULL;
 
-    void *on_complete;
+    void *on_complete = NULL;
 };
 
-struct TaskMaster {
-    uint32_t front;
-    uint32_t back;
+void runner(TaskMaster *task_master, uint8_t thread_id);
 
-    RingBuffer<Task, 12024> ts_task_buffer;
+struct TaskMaster {
+    uint32_t front = 0;
+    uint32_t back = 0;
+
+    RingBuffer<Task, 2048> ts_task_buffer;
+    std::thread threads[NUM_THREADS];
 
     Lock lock;
 
-    Task getTask() {
+    Task get_task() {
         Task task;
 
         //This should hang until a task is available
@@ -58,7 +79,26 @@ struct TaskMaster {
         //Return the actual task, because after this point the allocation in the array may be deleted (and they're very small memory wise)
         return task;
     };
+
+    void start_threads() {
+        for (int i = 0; i < NUM_THREADS; i++) {
+            threads[i] = std::thread(runner, this, i);
+        }
+    }
+
+    void queue_stop_all() {
+        lock.lock();
+        for (int i = 0; i < NUM_THREADS; i++) {
+            ts_task_buffer.push_back(
+                Task {.task_type = TaskType::STOP}
+            );
+        }
+        lock.unlock();
+    }
+
+    void join_all() {
+        for (int i = 0; i < NUM_THREADS; i++) {
+            this->threads[i].join();
+        }
+    }
 };
-
-void runner(TaskMaster *task_master, uint8_t thread_id);
-

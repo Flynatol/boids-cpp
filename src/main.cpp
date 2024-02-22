@@ -32,7 +32,6 @@ const uint16_t SIGHT_RANGE = 100;
 #define FRAME_RATE_LIMIT 165
 #define WORLD_SIZE_MULT 25
 //#define BOID_DENSITY_MAGIC_NUMBER todo
-#define NUM_THREADS 15
 #define USE_MULTICORE 
 
 static const Vector2 triangle[3] = {
@@ -43,8 +42,8 @@ static const Vector2 triangle[3] = {
 
 //#define DEBUG(...) myfile << TextFormat(__VA_ARGS__) << '\n';
 //#define DEBUG(...) ;
-#define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
-//#define DEBUG(...)
+//#define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
+#define DEBUG(...)
 
 
 
@@ -932,29 +931,29 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
     */
 }
 
-inline void update_non_interacting2(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
-    const auto xs = boid_list.m_boid_store->xs;
-    const auto ys = boid_list.m_boid_store->ys;
-    const auto vxs = boid_list.m_boid_store->vxs;
-    const auto vys = boid_list.m_boid_store->vys;
-    const auto homes = boid_list.m_boid_store->homes;
+inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules, const BoidList* boid_list) {
+    const auto xs = boid_list->m_boid_store->xs;
+    const auto ys = boid_list->m_boid_store->ys;
+    const auto vxs = boid_list->m_boid_store->vxs;
+    const auto vys = boid_list->m_boid_store->vys;
+    const auto homes = boid_list->m_boid_store->homes;
 
-    const auto world_height = boid_map.m_cell_size * boid_map.m_ysize;
-    const auto world_width = boid_map.m_cell_size * boid_map.m_xsize;
+    const auto world_height = boid_map->m_cell_size * boid_map->m_ysize;
+    const auto world_width = boid_map->m_cell_size * boid_map->m_xsize;
 
     //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
-    for (Boid boid = 0; boid < boid_list.m_size; boid++) {     
+    for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
         int home_index_y = homes[boid] / 16;
         int home_index_x = homes[boid] % 16;
 
-        float home_loc_x = home_index_x * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width;
-        float home_loc_y = home_index_y * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width;
+        float home_loc_x = home_index_x * ((world_width - rules->edge_width * 2) /  16) + rules->edge_width;
+        float home_loc_y = home_index_y * ((world_height - rules->edge_width * 2) /  9) + rules->edge_width;
 
         float dx = home_loc_x - xs[boid];
         float dy = home_loc_y - ys[boid];
 
-        vxs[boid] += dx * rules.homing;
-        vys[boid] += dy * rules.homing;
+        vxs[boid] += dx * rules->homing;
+        vys[boid] += dy * rules->homing;
 
           
         xs[boid] += vxs[boid];
@@ -962,7 +961,7 @@ inline void update_non_interacting2(const BoidMap& boid_map, const Rules& rules,
     }
 }
 
-void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
+inline void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
     for (int x = 0; x < boid_map->m_xsize; x++) {
         update_cell2(boid_map, x, y, rules, boid_list);
     }
@@ -1004,9 +1003,7 @@ void block_runner_unstable(int y, const BoidMap *boid_map, const Rules *rules, c
 //Stripes allocations to each thread (hopefully more cache local)
 inline void jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int y = thread_num * 2 + offset; y < boid_map->m_ysize; y += 2 * NUM_THREADS) {
-        for (int x = 0; x < boid_map->m_xsize; x++) {
-            update_cell2(boid_map, x, y, rules, boid_list);
-        }
+        row_runner(boid_map, y, rules, boid_list);
     }
 }
 
@@ -1019,14 +1016,6 @@ inline void async_runner(int y, std::future<void> *pool, const BoidMap *boid_map
     for (int x = 0; x < boid_map->m_xsize; x++) {
         update_cell2(boid_map, x, y, rules, boid_list);
     }
-}
-
-__thread volatile int you_shall_not_optimize_this;
-
-void work() {
-    // This is the simplest way I can think of to prevent the compiler and
-    // operating system from doing naughty things
-    you_shall_not_optimize_this = 42;
 }
 
 void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
@@ -1121,12 +1110,108 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
     
     auto t_mid = std::chrono::high_resolution_clock::now();
 
-    update_non_interacting2(boid_map, rules, boid_list);
+    update_non_interacting2(&boid_map, &rules, &boid_list);
 
     auto t_end = std::chrono::high_resolution_clock::now();
 
-    TraceLog(LOG_DEBUG, TextFormat("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count()));
+    DEBUG("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count());
 }
+
+void runner(TaskMaster *task_master, uint8_t thread_id) {
+    while(1) {
+        //Wait for task
+        Task current_task = task_master->get_task();
+
+        // Test case switch and function pointers
+        switch (current_task.task_type) {
+            case TaskType::ROW_RUNNER_PASS_ONE:
+                {
+                    auto s = ((row_runner_args *) current_task.argument_struct);
+                    row_runner(s->boid_map, s->y, s->rules, s->boid_list);
+                }
+                break;
+            
+            case TaskType::STOP:
+                return;
+        }
+
+        if (current_task.sync != NULL) {
+            current_task.sync->tc_lock.lock();
+                if (current_task.on_complete != NULL && current_task.sync->task_counter == 1) {
+                    current_task.sync->task_counter -= 1;
+                    ((void (*)(TaskMaster *, Task *)) current_task.on_complete)(task_master, &current_task);
+                } else {
+                    current_task.sync->task_counter -= 1;
+                }
+            current_task.sync->tc_lock.unlock();
+        }
+    }
+}
+
+void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+    //  Add tasks to task master
+    //  Spin up some threads
+    //  Let em go
+    
+    task_master->lock.lock();
+    
+    uint32_t tasks_added = 0;
+        
+    for (int y = 0; y < boid_map.m_ysize; y += 2) {
+        task_master->ts_task_buffer.push_back(
+            Task {
+                .task_type = TaskType::ROW_RUNNER_PASS_ONE,
+                .argument_struct = &arg_list[y],
+                .sync = task_monitor,
+                .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task)
+                {
+                    auto old_args = ((row_runner_args *)current_task->argument_struct);
+                    uint32_t tasks_added = 0;
+                    task_master->lock.lock();
+
+                    for (int y = 1; y < old_args->boid_map->m_ysize; y += 2) {
+                        task_master->ts_task_buffer.push_back(
+                            Task {
+                                .task_type = TaskType::ROW_RUNNER_PASS_ONE,
+                                .argument_struct = &old_args->arg_store[y],
+                                .sync = current_task->sync,
+                                .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
+                                    auto old_args = ((row_runner_args *)current_task->argument_struct);
+                                    update_non_interacting2(old_args->boid_map, old_args->rules, old_args->boid_list);
+                                    task_master->queue_stop_all();
+                                }),
+                            }
+                        );
+                        tasks_added++;
+                    }
+
+                    current_task->sync->task_counter = tasks_added;
+                    task_master->lock.unlock();
+                }),
+            }  
+        );
+
+        tasks_added++;
+    }
+    
+    /*
+    for (int i = 0; i < NUM_THREADS; i++) {
+        task_master->ts_task_buffer.push_back(
+            Task {
+                .task_type = TaskType::STOP,
+                .argument_struct = NULL,
+                .sync = NULL,
+                .on_complete = NULL,
+            }
+        );
+    }
+    */
+    task_monitor->tc_lock.lock();
+    task_monitor->task_counter += tasks_added;
+    task_monitor->tc_lock.unlock();
+
+    task_master->lock.unlock();
+}   
 
 void render(BoidList *boid_list, Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
     BeginDrawing();
@@ -1286,8 +1371,20 @@ int main (int argc, char* argv[]) {
     auto homes = boid_list.m_boid_store->homes;
     auto index_nexts = boid_list.m_boid_store->index_next;
     
-
-    while (WindowShouldClose() == false){  
+    
+    row_runner_args args[boid_map.m_ysize];
+    
+    for (uint32_t i = 0; i < boid_map.m_ysize; i++) {
+        args[i] = row_runner_args {
+            .boid_map = &boid_map,
+            .y = i,
+            .rules = &rules,
+            .arg_store = args,
+            .boid_list = &boid_list,
+        };
+    }
+    
+    while (WindowShouldClose() == false){
         auto t_start = std::chrono::high_resolution_clock::now();
         populate_map(boid_list, boid_map);
         auto t_mid = std::chrono::high_resolution_clock::now();
@@ -1304,8 +1401,21 @@ int main (int argc, char* argv[]) {
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
         SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
 
-        update_boids(boid_map, rules, boid_list);
+        //update_boids(boid_map, rules, boid_list);
+        auto t_update_start = std::chrono::high_resolution_clock::now();
 
+        
+        TaskMaster task_master;
+        TaskSync sync;
+        task_master.start_threads();
+
+        update_boids2(boid_map, args, &task_master, &sync);
+
+        auto t_update_mid = std::chrono::high_resolution_clock::now();
+        
+        auto t_update_end = std::chrono::high_resolution_clock::now();
+
+        DEBUG("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_update_mid-t_update_start).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_mid).count());
 
         //TODO move camera stuff to class
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)){
@@ -1418,9 +1528,10 @@ int main (int argc, char* argv[]) {
 
         EndDrawing();
         */
+        sync.wait();
         auto t_end_drawing = std::chrono::high_resolution_clock::now();
         DEBUG("Populate :%0.6f, rebuild: %0.6f, render: %0.6f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count(), std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count());
-
+        task_master.join_all();
     }
 
     CloseWindow();
