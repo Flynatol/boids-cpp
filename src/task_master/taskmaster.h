@@ -2,42 +2,30 @@
 
 #include <mutex>
 #include <thread>
+#include <algorithm>
+
+#include <minwindef.h>
+#include <minwinbase.h>
+#include <synchapi.h>
 
 #include "ringbuffer.h"
 #include "tm_shared.h"
-
-#define NUM_THREADS 4
-
-typedef volatile int spinlock_t;
-
-struct Lock {
-    spinlock_t lock_internal;
-
-    void lock() {
-        //Should probably try and avoid using these legacy built-ins
-        while (__sync_lock_test_and_set(&lock_internal, 1)) {}
-    }
-
-    void unlock() {
-        __sync_synchronize();
-        lock_internal = 0;
-    }
-};
-
-//typedef std::mutex Lock;
+#include "lock.h"
 
 struct TaskMaster;
 
+
 struct TaskSync {
     Lock tc_lock;
-    volatile int task_counter;
-
+    volatile int task_counter = 0;
+    
     void wait() {
         while (1) {
             tc_lock.lock();
+            //TraceLog(LOG_DEBUG, TextFormat("TC: %d", task_counter));
             if (task_counter == 0) break;
             tc_lock.unlock();
-            std::this_thread::yield();
+            //std::this_thread::yield();
         }
         tc_lock.unlock();
     };
@@ -58,8 +46,11 @@ struct TaskMaster {
     uint32_t front = 0;
     uint32_t back = 0;
 
+    uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
+
     RingBuffer<Task, 2048> ts_task_buffer;
-    std::thread threads[NUM_THREADS];
+    std::thread threads[64];
+    bool status[64];
 
     Lock lock;
 
@@ -85,14 +76,15 @@ struct TaskMaster {
     };
 
     void start_threads() {
-        for (int i = 0; i < NUM_THREADS; i++) {
+        for (int i = 0; i < num_threads; i++) {
             threads[i] = std::thread(runner, this, i);
+            status[i] = true;
         }
     }
 
     void queue_stop_all() {
         lock.lock();
-        for (int i = 0; i < NUM_THREADS; i++) {
+        for (int i = 0; i < num_threads; i++) {
             ts_task_buffer.push_back(
                 Task { .task_type = TaskType::STOP }
             );
@@ -101,8 +93,10 @@ struct TaskMaster {
     }
 
     void join_all() {
-        for (int i = 0; i < NUM_THREADS; i++) {
+        for (int i = 0; i < num_threads; i++) {
+            //TraceLog(LOG_DEBUG, TextFormat("Joining thread %d", i));
             this->threads[i].join();
+            //TraceLog(LOG_DEBUG, TextFormat("Joined"));
         }
     }
 };

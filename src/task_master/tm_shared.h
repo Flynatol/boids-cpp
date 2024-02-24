@@ -6,8 +6,8 @@
 #include "..\ui.h"
 
 enum TaskType {
-    TEST_TASK1,
-    TEST_TASK3,
+    POPULATE,
+    REBUILD,
     ROW_RUNNER_PASS_ONE,
     ROW_RUNNER_PASS_TWO,
     STOP,
@@ -22,6 +22,21 @@ struct row_runner_args {
     uint32_t y;
     Rules *rules; 
     row_runner_args* arg_store;
+    BoidList* boid_list;
+};
+
+struct rebuild_args {
+    BoidMap *boid_map;
+    uint32_t y;
+    //rebuild_args* arg_store;
+    Boid *index_buffer;
+    BoidList* boid_list;
+};
+
+struct populate_args {
+    BoidMap *boid_map;
+    uint32_t start;
+    uint32_t task_size;
     BoidList* boid_list;
 };
 

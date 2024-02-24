@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <raylib.h>
+#include ".\task_master\lock.h"
 
 typedef int32_t Boid;
 
@@ -12,6 +13,7 @@ class BoidMap {
         int m_cell_size; 
         Boid *m_boid_map;
         Boid *m_index_buffer;
+        Lock *safety = new Lock[m_xsize * m_ysize];
 
     public:
         BoidMap() = delete;
