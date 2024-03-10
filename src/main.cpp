@@ -611,15 +611,36 @@ inline void calc_avg(__m256& current_xs_vec, __m256& current_ys_vec, __m256& nea
 	f((i+6*8))		f((i+7*8))
 
 
+#define compute(i) \
+    { \
+    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec); \
+    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec); \
+    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta)); \
+    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS); \
+    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS); \
+    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask); \
+    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.)); \
+    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec); \
+    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds); \
+    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))); \
+    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))); \
+    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec); \
+    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec); \
+    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec); \ 
+    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); \
+    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); \
+    nearby_xs_vec   = _mm256_permutevar8x32_ps(nearby_xs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
+    nearby_ys_vec   = _mm256_permutevar8x32_ps(nearby_ys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
+    nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
+    nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
+    } 
+
 inline void update_cell2(const BoidMap *map, const int x, const int y, const Rules *rules, const BoidList *boid_list) {
     const auto world_height = map->m_cell_size * map->m_ysize;
     const auto world_width = map->m_cell_size * map->m_xsize;
 
     const Boid cell_to_update = map->get_coord(y, x);
     if (cell_to_update == -1 ) return;
-
-    int i = 0;
-    //UNROLL8(DEBUG, i)
 
     const auto xs = boid_list->m_boid_store->xs;
     const auto ys = boid_list->m_boid_store->ys;
@@ -659,6 +680,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                 Boid current = map->get_coord(y + cy, x + cx);
                 if (current != -1) {
                     if (row_begin == -1) row_begin = current;
+                    
                     row_end = current + boid_list->m_boid_store->depth[current];
                 }
             }
@@ -722,43 +744,11 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                     nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                 }
-                /*
                 
-                //Do stuff
-                CALC_AVG
-                
-                //Then (permute + do stuff) x 3
-                for (int i = 4; i > 0; i--) {
-                    nearby_xs_vec   = _mm256_shuffle_ps(nearby_xs_vec, nearby_xs_vec, _MM_SHUFFLE(0, 3, 2, 1));
-                    nearby_ys_vec   = _mm256_shuffle_ps(nearby_ys_vec, nearby_ys_vec, _MM_SHUFFLE(0, 3, 2, 1));
-                    nearby_vxs_vec  = _mm256_shuffle_ps(nearby_vxs_vec, nearby_vxs_vec, _MM_SHUFFLE(0, 3, 2, 1));
-                    nearby_vys_vec  = _mm256_shuffle_ps(nearby_vys_vec, nearby_vys_vec, _MM_SHUFFLE(0, 3, 2, 1));
-
-                    CALC_AVG
-                }
-                //Big flip TODO
-                nearby_xs_vec   = _mm256_permutevar8x32_ps(nearby_xs_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
-                nearby_ys_vec   = _mm256_permutevar8x32_ps(nearby_ys_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
-                nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
-                nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
-
-                
-                //Do stuff
-
-                CALC_AVG
-
-                //Then (permute + do stuff) x 3
-                for (int i = 4; i > 0; i--) {
-                    nearby_xs_vec   = _mm256_shuffle_ps(nearby_xs_vec, nearby_xs_vec, _MM_SHUFFLE(0, 3, 2, 1));
-                    nearby_ys_vec   = _mm256_shuffle_ps(nearby_ys_vec, nearby_ys_vec, _MM_SHUFFLE(0, 3, 2, 1));
-                    nearby_vxs_vec  = _mm256_shuffle_ps(nearby_vxs_vec, nearby_vxs_vec, _MM_SHUFFLE(0, 3, 2, 1));
-                    nearby_vys_vec  = _mm256_shuffle_ps(nearby_vys_vec, nearby_vys_vec, _MM_SHUFFLE(0, 3, 2, 1));
-
-                    CALC_AVG
-                }
-                */
-                
+                UNROLL8(compute, i);        
             }
+            
+           
         }
 
         //Write out the data from tracking vecs
@@ -802,38 +792,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
 
         vxs_out = _mm256_add_ps(vxs_out, _mm256_sub_ps(_mm256_and_ps(cmpx_1, rf), _mm256_and_ps(cmpx_2, rf)));
         vys_out = _mm256_add_ps(vys_out, _mm256_sub_ps(_mm256_and_ps(cmpy_1, rf), _mm256_and_ps(cmpy_2, rf)));
-        
-
-        //Apply homing
-
-        //TODO
-
-        //Update Xs and Ys
-        /*
-        float speed = sqrtf((vxs[boid]*vxs[boid]) + (vys[boid]*vys[boid]));
-        
-        
-        //speed = speed + (!speed);
-        
-        auto const minspeed = 3.0f;
-        auto const maxspeed = 4.0f;
-
-        float ispeed = maxspeed/speed;
-        float lspeed = minspeed/speed;
-
-        vxs[boid] = (speed <= maxspeed) * vxs[boid] + (speed > maxspeed) * vxs[boid] * ispeed;
-        vys[boid] = (speed <= maxspeed) * vys[boid] + (speed > maxspeed) * vys[boid] * ispeed;
-
-        vxs[boid] = (speed >= minspeed) * vxs[boid] + (speed < minspeed) * vxs[boid] * lspeed;
-        vys[boid] = (speed >= minspeed) * vys[boid] + (speed < minspeed) * vys[boid] * lspeed;
-
-        //if (boid < 8) DEBUG("xs[b]: %f", ys[boid] + vys[boid]*ispeed);
-        
-        xs[boid] += vxs[boid];
-        ys[boid] += vys[boid];        
-        */
-
-        
+              
         auto const minspeed = 3.0f;
         auto const maxspeed = 4.0f;
 
@@ -1024,6 +983,7 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
     const auto world_height = boid_map->m_cell_size * boid_map->m_ysize;
     const auto world_width = boid_map->m_cell_size * boid_map->m_xsize;
 
+    //This is simple enough that it is being auto vectorized by the compiler (can see in the asm)
     for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
         int home_index_y = homes[boid] / 16;
         int home_index_x = homes[boid] % 16;
