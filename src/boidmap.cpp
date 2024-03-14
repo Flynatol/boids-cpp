@@ -1,6 +1,7 @@
 #include <raylib.h>
 #include <raymath.h>
 #include <algorithm>
+#include <cmath>
 
 #include "boidmap.h"
 
@@ -34,7 +35,7 @@ Boid BoidMap::get_coord(const int y, const int x) const {
 Boid BoidMap::get_map_pos_nearest(const int x, const int y) const {
     int col = std::min(std::max(x, 0), m_cell_size * m_xsize - 1) / m_cell_size;
     int row = std::min(std::max(y, 0), m_cell_size * m_ysize - 1) / m_cell_size;
-
+    
     return row * m_xsize + col;
 }
 

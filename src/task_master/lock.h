@@ -1,7 +1,8 @@
 #pragma once
+#define NOMINMAX
 
-#include <minwindef.h>
-#include <minwinbase.h>
+#include <Windows.h>
+
 #include <synchapi.h>
 #include <mutex>
 #include <thread>

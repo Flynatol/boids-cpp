@@ -4,10 +4,6 @@
 #include <thread>
 #include <algorithm>
 
-#include <minwindef.h>
-#include <minwinbase.h>
-#include <synchapi.h>
-
 #include "ringbuffer.h"
 #include "tm_shared.h"
 #include "lock.h"

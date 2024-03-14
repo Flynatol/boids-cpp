@@ -10,11 +10,11 @@ struct BoidStore {
     int32_t *homes;       
     int32_t *depth;
 
-    BoidStore(std::size_t to_alloc);
+    BoidStore(size_t to_alloc);
     ~BoidStore();      
 } typedef BoidStore;
 
-BoidStore* new_boidstore(std::size_t to_alloc);
+BoidStore* new_boidstore(size_t to_alloc);
 
 void free_boidstore_members(BoidStore *boid_store);
 

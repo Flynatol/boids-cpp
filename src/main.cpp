@@ -15,6 +15,7 @@
 #include <thread>
 #include <future>
 #include <algorithm>
+#include <limits>
 
 #define NO_FONT_AWESOME
 
@@ -27,6 +28,10 @@
 
 #include <forward_list>
 
+#define TRACY_CALLSTACK 32
+#include ".\tracy\tracy\Tracy.hpp"
+
+#pragma comment(lib, "Winmm.lib")
 
 std::ofstream myfile;
 
@@ -113,6 +118,7 @@ void jump_writer(int thread_start_pos, const Boid* index_buffer, const BoidList 
 }
 
 void write_row_to_list(const uint32_t row, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+    ZoneScoped;
     for (int x = 0; x < boid_map->m_xsize; x++) {
         write_map_to_list(boid_map->m_xsize * row + x, index_buffer, boid_list, boid_map); 
     }
@@ -187,7 +193,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     //std::vector<std::future<void>> pool;
     //pool.resize(NUM_THREADS);
 
-    std::thread threads[NUM_THREADS];
+    std::thread* threads = new std::thread[NUM_THREADS];
     
     for (int i = 0; i < NUM_THREADS; i++) {
         //int num = i * ((boid_map.m_xsize * boid_map.m_ysize) / NUM_THREADS);
@@ -204,6 +210,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     }
     
     free(index_buffer);
+    delete[] threads;
 
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
@@ -238,7 +245,8 @@ void block_populate(int thread_start_pos, const BoidList *boid_list, const BoidM
     }
 }
 
-void populate_n(uint32_t start, uint32_t task_size, const BoidList *boid_list, const BoidMap *boid_map) {
+inline void populate_n(uint32_t start, uint32_t task_size, const BoidList *boid_list, const BoidMap *boid_map) {
+    ZoneScoped;
     for (uint32_t i = start; i < start + task_size; i++) {
         place_boid(*boid_map, *boid_list, i);
     }
@@ -334,7 +342,7 @@ void debug_vector(U vector, const char* format) {
 inline __m256i vector_sum(__m256i v) {
     __m256i temp = _mm256_hadd_epi32(v, v);
     temp = _mm256_hadd_epi32(temp, temp);
-    __m256i fliptemp = (__m256i) _mm256_permute2f128_ps((__m256) temp, (__m256) temp, 1);
+    __m256i fliptemp = _mm256_permute2f128_si256(temp, temp, 1);
     return _mm256_add_epi32(temp, fliptemp);
 }
 
@@ -610,7 +618,7 @@ inline void calc_avg(__m256& current_xs_vec, __m256& current_ys_vec, __m256& nea
 	f((i+4*8)) 		f((i+5*8)) \
 	f((i+6*8))		f((i+7*8))
 
-
+/*
 #define compute(i) \
     { \
     const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec); \
@@ -634,11 +642,13 @@ inline void calc_avg(__m256& current_xs_vec, __m256& current_ys_vec, __m256& nea
     nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
     nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
     } 
+*/
 
 inline void update_cell2(const BoidMap *map, const int x, const int y, const Rules *rules, const BoidList *boid_list) {
     const auto world_height = map->m_cell_size * map->m_ysize;
     const auto world_width = map->m_cell_size * map->m_xsize;
 
+    //Maybe add these to task allocator
     const Boid cell_to_update = map->get_coord(y, x);
     if (cell_to_update == -1 ) return;
 
@@ -677,10 +687,11 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
 
             //Todo check if this would be faster branchless -- probably not worth the readability
             for (int cx = -1; cx <= 1; cx++) {
+                // This line could be slow
                 Boid current = map->get_coord(y + cy, x + cx);
                 if (current != -1) {
                     if (row_begin == -1) row_begin = current;
-                    
+                    //This line is probably bad too
                     row_end = current + boid_list->m_boid_store->depth[current];
                 }
             }
@@ -693,9 +704,10 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                 auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
                 auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
 
-                auto test_vec = _mm256_set_ps(0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f);
+                //auto test_vec = _mm256_set_ps(0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f);
                 //DEBUG("Test started");
                 //For each of the 8 permutations do some work TODO unroll this and use the faster in lane permute most of the time
+                
                 
                 for (int i = 0; i < 8; i++) {
                     //debug_vector<float>(test_vec, "%f");
@@ -745,7 +757,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                 }
                 
-                UNROLL8(compute, i);        
+                //UNROLL8(compute, i);        
             }
             
            
@@ -753,7 +765,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
 
         //Write out the data from tracking vecs
         //I should probably change the type of ISC
-        __m256 isc_mask = (__m256) _mm256_cmpgt_epi32(isc, _mm256_set1_epi32(0));
+        __m256 isc_mask = _mm256_castsi256_ps(_mm256_cmpgt_epi32(isc, _mm256_set1_epi32(0)));
 
         //Avoidance
         auto vxs_out = _mm256_loadu_ps(&vxs[current_boid]);
@@ -803,7 +815,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
 
         auto too_slow = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(1.0/minspeed), _CMP_GT_OS);
         auto too_fast = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(1.0/maxspeed), _CMP_LT_OS);
-        auto too_inf = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(__FLT_MAX__), _CMP_GT_OS);
+        auto too_inf = _mm256_cmp_ps(rspeed_vec, _mm256_set1_ps(std::numeric_limits<float>::max()), _CMP_GT_OS);
 
         auto multiplers = _mm256_set1_ps(1.0);
         multiplers = _mm256_blendv_ps(multiplers, lspeed_vec, too_slow);
@@ -974,6 +986,9 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
 }
 
 inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules, const BoidList* boid_list) {
+    ZoneScoped;
+
+    auto t_start = std::chrono::high_resolution_clock::now();
     const auto xs = boid_list->m_boid_store->xs;
     const auto ys = boid_list->m_boid_store->ys;
     const auto vxs = boid_list->m_boid_store->vxs;
@@ -983,26 +998,54 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
     const auto world_height = boid_map->m_cell_size * boid_map->m_ysize;
     const auto world_width = boid_map->m_cell_size * boid_map->m_xsize;
 
-    //This is simple enough that it is being auto vectorized by the compiler (can see in the asm)
-    for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
-        int home_index_y = homes[boid] / 16;
-        int home_index_x = homes[boid] % 16;
+    const auto ew = _mm256_set1_ps(rules->edge_width);
+    const auto wh = _mm256_set1_ps(world_height);
+    const auto ww = _mm256_set1_ps(world_width);
 
-        float home_loc_x = home_index_x * ((world_width - rules->edge_width * 2) /  16) + rules->edge_width;
-        float home_loc_y = home_index_y * ((world_height - rules->edge_width * 2) /  9) + rules->edge_width;
+    const auto ew2 = _mm256_mul_ps(ew, _mm256_set1_ps(2));
+    //const auto x_const = 
+
+    //This is simple enough that it is being auto vectorized by the compiler (can see in the asm)
+    //After moving to cl from g++ this doesn't seem to be true anymore
+    
+    for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
+        
+        //int home_index_y = homes[boid] / 16;
+        //int home_index_x = homes[boid] % 16;
+        
+        int home_index_y = homes[boid] >> 4;
+        int home_index_x = homes[boid] & 15;
+
+        float home_loc_x = (home_index_x + 1) * ((world_width - rules->edge_width * 2) / (16 + 1)) + rules->edge_width;
+        float home_loc_y = (home_index_y + 1) * ((world_height - rules->edge_width * 2) / (9 + 1)) + rules->edge_width;
 
         float dx = home_loc_x - xs[boid];
         float dy = home_loc_y - ys[boid];
 
         vxs[boid] += dx * rules->homing;
         vys[boid] += dy * rules->homing;
-
+        
         xs[boid] += vxs[boid];
         ys[boid] += vys[boid];        
     }
+
+    
+    for (Boid boid = 0; boid < boid_list->m_size; boid += 8) {
+        const auto homes_vec = _mm256_loadu_si256((const __m256i*) &homes[boid]);
+
+        auto home_index_y_vec = _mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4));
+        auto home_index_x_vec = _mm256_and_si256(homes_vec, _mm256_set1_epi32(15));
+    
+    }
+    
+    auto t_end = std::chrono::high_resolution_clock::now();
+
+    DEBUG("Non inter :%0.4f", std::chrono::duration<double, std::milli>(t_end-t_start).count()); 
+
 }
 
 inline void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
+    ZoneScoped;
     for (int x = 0; x < boid_map->m_xsize; x++) {
         update_cell2(boid_map, x, y, rules, boid_list);
     }
@@ -1083,13 +1126,13 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
 
     #ifdef USE_MULTICORE
 
-    std::thread threads[NUM_THREADS];
 
     //Async is currently slower than my threading implementation
 
     #define USE_ASYNC
 
     #ifndef USE_ASYNC
+    std::thread threads[NUM_THREADS];
 
     for (int i = 0; i < NUM_THREADS; i++) {
         //block_runner(i, false, &boid_map, &rules, &boid_list);
@@ -1228,6 +1271,7 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
                                     auto old_args = ((row_runner_args *)current_task->argument_struct);
                                     update_non_interacting2(old_args->boid_map, old_args->rules, old_args->boid_list);
                                     task_master->queue_stop_all();
+                                    FrameMarkEnd("Update Boids");
                                 }),
                             }
                         );
@@ -1305,7 +1349,7 @@ void rebuild_list2(const BoidMap& boid_map, const BoidList& boid_list, rebuild_a
     task_master->lock.unlock();
 }   
 
-void render(BoidList *boid_list, Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
+void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
     BeginDrawing();
         ClearBackground(BLACK);
 
@@ -1320,8 +1364,9 @@ void render(BoidList *boid_list, Ui *ui, Rules &rules, Camera2D cam, Camera3D ca
         auto t_end_3d = std::chrono::high_resolution_clock::now();
 
         //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
-        /*
+        
         BeginMode2D(cam);
+            /*
             Boid current = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
             while (current != -1) {
                 rlPushMatrix();
@@ -1333,26 +1378,27 @@ void render(BoidList *boid_list, Ui *ui, Rules &rules, Camera2D cam, Camera3D ca
 
                 current = index_nexts[current];
             }        
-
+            */
             if (rules.show_lines) {
                 //Draw grid
-                for (int y = 0; y < boid_map.m_ysize; y++) {
-                    DrawLine(0, y*boid_map.m_cell_size, boid_map.m_xsize*boid_map.m_cell_size, y*boid_map.m_cell_size, GRAY);
+                for (int y = 0; y < boid_map->m_ysize; y++) {
+                    DrawLine(0, y*boid_map->m_cell_size, boid_map->m_xsize*boid_map->m_cell_size, y*boid_map->m_cell_size, GRAY);
                 }
-                for (int x = 0; x < boid_map.m_xsize; x++) {
-                    DrawLine(x*boid_map.m_cell_size, 0, x*boid_map.m_cell_size, boid_map.m_ysize * boid_map.m_cell_size, GRAY);
+                for (int x = 0; x < boid_map->m_xsize; x++) {
+                    DrawLine(x*boid_map->m_cell_size, 0, x*boid_map->m_cell_size, boid_map->m_ysize * boid_map->m_cell_size, GRAY);
                 }
             }
         EndMode2D();
-        */
+        
         ui->Render(cam, camera, rules);
 
     EndDrawing();
 }
 
 
-int main (int argc, char* argv[]) {
-    uint32_t num_boids = atoi(argv[1]);
+int main(int argc, char* argv[]) {
+    //num_boids = atoi(argv[1]);
+    uint32_t num_boids = 2000000;
 
     SetTraceLogLevel(LOG_ALL);
 
@@ -1403,7 +1449,7 @@ int main (int argc, char* argv[]) {
         .sight_range_squared = SIGHT_RANGE * SIGHT_RANGE,
         .alignment_factor = 0.05f,
         .cohesion_factor = 0.0005f,
-        .edge_width = 30,
+        .edge_width = 300,
         .edge_factor = 0.05,
         .rand = 0.1,
         .homing = 0.0000051,
@@ -1427,14 +1473,13 @@ int main (int argc, char* argv[]) {
     cam.zoom = static_cast<float>(screen_width) / world_width;
 
     Camera camera = {
-        .position = (Vector3){world_width/2.f, 200.f, world_height/2.f},            
-        .target = (Vector3){world_width/2.f, 0.0f, world_height/2.f},                
-        .up = (Vector3){ 0.0f, 0.0f, -1.0f },                    
+        .position = Vector3 {world_width/2.f, 200.f, world_height/2.f},            
+        .target = Vector3 {world_width/2.f, 0.0f, world_height/2.f},                
+        .up =  Vector3 { 0.0f, 0.0f, -1.0f },                    
         .fovy = (float) world_height,                                          
         .projection = CAMERA_ORTHOGRAPHIC,                      
     };
-
-
+    
     const int CELL_WIDTH = 100;
     //assert(CELL_WIDTH >= rules.sight_range);
     BoidMap boid_map(world_height, world_width, CELL_WIDTH);
@@ -1442,12 +1487,13 @@ int main (int argc, char* argv[]) {
     std::srand(std::time(nullptr));
     
     std::default_random_engine generator;
-    std::uniform_real_distribution<float> width_distribution (rules.edge_width, world_width - rules.edge_width);
-    std::uniform_real_distribution<float> height_distribution (rules.edge_width, world_height - rules.edge_width);
+    
+    const float home_width = ((world_width - rules.edge_width * 2) / (16 + 1));
+    const float home_height = ((world_height - rules.edge_width * 2) / (9 + 1));
 
     //TODO just clean this up
-    std::uniform_real_distribution<float> width_distribution2 (-((world_width - rules.edge_width * 2) /  16) / 2, ((world_width - rules.edge_width * 2) /  16) / 2);
-    std::uniform_real_distribution<float> height_distribution2 (-((world_width - rules.edge_width * 2) /  9) / 2, ((world_width - rules.edge_width * 2) /  9) / 2);
+    std::uniform_real_distribution<float> width_distribution2 (-home_width / 2.f, home_width / 2.f);
+    std::uniform_real_distribution<float> height_distribution2 (-home_height / 2.f, home_height / 2.f);
 
     //Populate some test boids
     for (int i = 0; i < boid_list.m_size; i++) {
@@ -1459,8 +1505,8 @@ int main (int argc, char* argv[]) {
         int home_index_y = boid_list.m_boid_store->homes[i] / 16;
         int home_index_x = boid_list.m_boid_store->homes[i] % 16;
 
-        boid_list.m_boid_store->xs[i] = home_index_x * ((world_width - rules.edge_width * 2) /  16) + rules.edge_width + width_distribution2(generator);
-        boid_list.m_boid_store->ys[i] = home_index_y * ((world_height - rules.edge_width * 2) /  9) + rules.edge_width + height_distribution2(generator);
+        boid_list.m_boid_store->xs[i] = (home_index_x + 1) * home_width  + rules.edge_width + width_distribution2(generator);
+        boid_list.m_boid_store->ys[i] = (home_index_y + 1) * home_height + rules.edge_width + height_distribution2(generator);
     }
 
 
@@ -1475,8 +1521,8 @@ int main (int argc, char* argv[]) {
     auto index_nexts = boid_list.m_boid_store->index_next;
     */
 
-    row_runner_args args_update[boid_map.m_ysize];
-    rebuild_args args_rebuild[boid_map.m_ysize];
+    auto args_update = new row_runner_args[boid_map.m_ysize];
+    auto args_rebuild = new rebuild_args[boid_map.m_ysize];
 
     Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid));
 
@@ -1523,19 +1569,24 @@ int main (int argc, char* argv[]) {
         task_master.start_threads();
 
         TaskSync task_populate;
+        FrameMarkStart("Map Population");
         populate_map2(boid_list, boid_map, &task_master, &task_populate, args_populate, num_tasks);
         task_populate.wait();
-        
+        FrameMarkEnd("Map Population");
+
         auto t_mid = std::chrono::high_resolution_clock::now();
 
         TaskSync task_rebuild;
+        FrameMarkStart("Rebuild List");
         rebuild_list2(boid_map, boid_list, args_rebuild, &task_master, &task_rebuild);
         task_rebuild.wait();
+        FrameMarkEnd("Rebuild List");
 
         auto t_end = std::chrono::high_resolution_clock::now();
         auto t_update_start = std::chrono::high_resolution_clock::now();
 
         TaskSync task_update;
+        FrameMarkStart("Update Boids");
         update_boids2(boid_map, args_update, &task_master, &task_update);
 
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
@@ -1579,18 +1630,22 @@ int main (int argc, char* argv[]) {
         }
         
         auto t_start_drawing = std::chrono::high_resolution_clock::now();
-        render(&boid_list, &ui, rules, cam, camera, &tri, &matInstances);
-
+        FrameMarkStart("Render");
+        render(&boid_list, &boid_map, &ui, rules, cam, camera, &tri, &matInstances);
+        FrameMarkEnd("Render");
         auto t_end_drawing = std::chrono::high_resolution_clock::now();
+
         task_master.join_all();
         auto t_update_end = std::chrono::high_resolution_clock::now();
         
         DEBUG("Populate :%0.4f, rebuild: %0.4f, render: %0.4f, comp: %0.4f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count(), 
         std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_start).count());
         //return 0;
+        
+        FrameMark;
     }
-
-    CloseWindow();
+    
+    rl_CloseWindow();
     return 0;
 }
 
