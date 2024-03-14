@@ -1,6 +1,8 @@
 #pragma once
-#define NOMINMAX
 
+#ifndef NOMINMAX
+    #define NOMINMAX
+#endif
 #include <Windows.h>
 
 #include <synchapi.h>
@@ -57,5 +59,6 @@ struct Lock {
         TraceLog(LOG_DEBUG, TextFormat("Unlocked %d", debug));
     }
 };
+
 
 //typedef std::mutex Lock;

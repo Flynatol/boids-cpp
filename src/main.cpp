@@ -26,8 +26,6 @@
 #include ".\task_master\taskmaster.h"
 #include ".\task_master\tm_shared.h"
 
-#include <forward_list>
-
 #define TRACY_CALLSTACK 32
 #include ".\tracy\tracy\Tracy.hpp"
 
@@ -42,16 +40,22 @@ const uint16_t SIGHT_RANGE = 100;
 #define BOID_DENSITY_MAGIC_NUMBER 2304.0
 #define USE_MULTICORE 
 
+#define DEBUG_ENABLED
+
+#ifdef DEBUG_ENABLED
+    #define TIME_NOW std::chrono::high_resolution_clock::now()
+    #define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
+#endif
+#ifndef DEBUG_ENABLED
+    #define TIME_NOW (0.f)
+    #define DEBUG(...)
+#endif
+
 static const Vector2 triangle[3] = {
     Vector2 {0.f, 2 * TRIANGLE_SIZE},
     Vector2 {-TRIANGLE_SIZE, -2 * TRIANGLE_SIZE},
     Vector2 {TRIANGLE_SIZE, -2 * TRIANGLE_SIZE}
 };
-
-//#define DEBUG(...) myfile << TextFormat(__VA_ARGS__) << '\n';
-//#define DEBUG(...) ;
-#define DEBUG(...) TraceLog(LOG_DEBUG, TextFormat(__VA_ARGS__));
-//#define DEBUG(...)
 
 #define NUM_THREADS num_threads
 
@@ -126,7 +130,7 @@ void write_row_to_list(const uint32_t row, const Boid* index_buffer, const BoidL
 
 //std::future<void> render_task
 void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
-    auto t_start = std::chrono::high_resolution_clock::now();
+    auto t_start = TIME_NOW;
 
     BoidStore *main_buffer = boid_list.m_boid_store;
     BoidStore *back_buffer = boid_list.m_backbuffer;
@@ -188,7 +192,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
         counter += (current != -1) * main_buffer->depth[current];   
     }
 
-    auto t_mid = std::chrono::high_resolution_clock::now();
+    auto t_mid = TIME_NOW;
 
     //std::vector<std::future<void>> pool;
     //pool.resize(NUM_THREADS);
@@ -215,7 +219,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     boid_list.m_boid_store = back_buffer;
     boid_list.m_backbuffer = main_buffer;
 
-    auto t_end = std::chrono::high_resolution_clock::now();
+    auto t_end = TIME_NOW;
 }
 
 inline void place_boid(const BoidMap& map, const BoidList& boid_list, Boid boid_to_place) {
@@ -656,6 +660,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
     const auto ys = boid_list->m_boid_store->ys;
     const auto vxs = boid_list->m_boid_store->vxs;
     const auto vys = boid_list->m_boid_store->vys;
+    const auto homes = boid_list->m_boid_store->homes; 
 
     const auto ads_vec = _mm256_set1_ps(rules->avoid_distance_squared);
     const auto srs_vec = _mm256_set1_ps(rules->sight_range_squared);
@@ -667,7 +672,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
     for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid += 8) {
         auto current_xs_vec = _mm256_loadu_ps(&xs[current_boid]);
         auto current_ys_vec = _mm256_loadu_ps(&ys[current_boid]);              
- 
+        
         //Tracking vecs
         __m256 sep_x_vec = _mm256_set1_ps(0.);
         __m256 sep_y_vec = _mm256_set1_ps(0.);
@@ -825,18 +830,32 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
         vxs_out = _mm256_mul_ps(multiplers, vxs_out);
         vys_out = _mm256_mul_ps(multiplers, vys_out);
 
-        //vxs_out = vxs_out_temp;
-        //vys_out = vys_out_temp;
-
-        //Maybe we should mask here to avoid messing up data in the next cell.
-        //But generating that mask is somewhat expensive
-        //current_xs_vec = _mm256_add_ps(current_xs_vec, vxs_out);
-        //current_ys_vec = _mm256_add_ps(current_ys_vec, vys_out);
+        ////////////////////////////////////////////
         
+        /*
+        const auto homes_vec = _mm256_loadu_si256((const __m256i*) &homes[current_boid]);
 
-        //_mm256_storeu_ps(&xs[current_boid], current_xs_vec);
-        //_mm256_storeu_ps(&ys[current_boid], current_ys_vec);
+        auto home_index_x_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_and_si256(homes_vec, _mm256_set1_epi32(15)), _mm256_set1_epi32(1)));
+        auto home_index_y_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4)), _mm256_set1_epi32(1)));
 
+        auto home_loc_x_vec = _mm256_fmadd_ps(home_index_x_vec, _mm256_set1_ps((float) ((world_width - rules->edge_width * 2) / (16 + 1))), ew);
+        auto home_loc_y_vec = _mm256_fmadd_ps(home_index_y_vec, _mm256_set1_ps((float) ((world_height - rules->edge_width * 2) / (9 + 1))), ew);
+
+        auto dx_vec = _mm256_sub_ps(home_loc_x_vec, current_xs_vec);
+        auto dy_vec = _mm256_sub_ps(home_loc_y_vec, current_ys_vec);
+
+        vxs_out = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), vxs_out);
+        vys_out = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), vys_out);
+        */
+        /*
+        auto xs_out = _mm256_add_ps(current_xs_vec, vxs_out);
+        auto ys_out = _mm256_add_ps(current_ys_vec, vys_out);
+
+        _mm256_storeu_ps(&xs[current_boid], xs_out);
+        _mm256_storeu_ps(&ys[current_boid], ys_out);
+        */
+
+        ///////////////////////////////////////////
         _mm256_storeu_ps(&vxs[current_boid], vxs_out);
         _mm256_storeu_ps(&vys[current_boid], vys_out);
     } 
@@ -987,8 +1006,7 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
 
 inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules, const BoidList* boid_list) {
     ZoneScoped;
-
-    auto t_start = std::chrono::high_resolution_clock::now();
+    auto t_start = TIME_NOW;
     const auto xs = boid_list->m_boid_store->xs;
     const auto ys = boid_list->m_boid_store->ys;
     const auto vxs = boid_list->m_boid_store->vxs;
@@ -1003,18 +1021,21 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
     const auto ww = _mm256_set1_ps(world_width);
 
     const auto ew2 = _mm256_mul_ps(ew, _mm256_set1_ps(2));
-    //const auto x_const = 
+
+    const auto x_const = _mm256_set1_ps((float) ((world_width - rules->edge_width * 2) / (16 + 1)));
+    const auto y_const = _mm256_set1_ps((float) ((world_height - rules->edge_width * 2) / (9 + 1)));
 
     //This is simple enough that it is being auto vectorized by the compiler (can see in the asm)
     //After moving to cl from g++ this doesn't seem to be true anymore
     
+    /*
     for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
         
         //int home_index_y = homes[boid] / 16;
         //int home_index_x = homes[boid] % 16;
         
-        int home_index_y = homes[boid] >> 4;
         int home_index_x = homes[boid] & 15;
+        int home_index_y = homes[boid] >> 4;
 
         float home_loc_x = (home_index_x + 1) * ((world_width - rules->edge_width * 2) / (16 + 1)) + rules->edge_width;
         float home_loc_y = (home_index_y + 1) * ((world_height - rules->edge_width * 2) / (9 + 1)) + rules->edge_width;
@@ -1028,20 +1049,51 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
         xs[boid] += vxs[boid];
         ys[boid] += vys[boid];        
     }
-
+    */
+    
     
     for (Boid boid = 0; boid < boid_list->m_size; boid += 8) {
-        const auto homes_vec = _mm256_loadu_si256((const __m256i*) &homes[boid]);
+        const auto homes_vec = _mm256_load_si256((const __m256i*) &homes[boid]);
 
-        auto home_index_y_vec = _mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4));
-        auto home_index_x_vec = _mm256_and_si256(homes_vec, _mm256_set1_epi32(15));
-    
+        const auto home_index_x_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_and_si256(homes_vec, _mm256_set1_epi32(15)), _mm256_set1_epi32(1)));
+        const auto home_index_y_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4)), _mm256_set1_epi32(1)));
+
+        const auto home_loc_x_vec = _mm256_fmadd_ps(home_index_x_vec, x_const, ew);
+        const auto home_loc_y_vec = _mm256_fmadd_ps(home_index_y_vec, y_const, ew);
+
+        const auto store_x = _mm256_loadu_ps(&xs[boid]);
+        const auto store_y = _mm256_loadu_ps(&ys[boid]);
+
+        const auto dx_vec = _mm256_sub_ps(home_loc_x_vec, store_x);
+        const auto dy_vec = _mm256_sub_ps(home_loc_y_vec, store_y);
+
+        const auto vxs_vec = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), _mm256_loadu_ps(&vxs[boid]));
+        const auto vys_vec = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), _mm256_loadu_ps(&vys[boid]));
+
+        _mm256_storeu_ps(&vxs[boid], vxs_vec);
+        _mm256_storeu_ps(&vys[boid], vys_vec);
+
+        const auto xs_out = _mm256_add_ps(store_x, vxs_vec);
+        const auto ys_out = _mm256_add_ps(store_y, vys_vec);
+
+        _mm256_storeu_ps(&xs[boid], xs_out);
+        _mm256_storeu_ps(&ys[boid], ys_out);
     }
     
-    auto t_end = std::chrono::high_resolution_clock::now();
-
+    /*
+    for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
+        xs[boid] += vxs[boid];
+        ys[boid] += vys[boid];        
+    }
+    */
+    /*
+    for (Boid boid = 0; boid < boid_list->m_size; boid += 8) {
+        _mm256_store_ps(&xs[boid] ,_mm256_add_ps(_mm256_loadu_ps(&vxs[boid]), _mm256_loadu_ps(&xs[boid])));
+        _mm256_store_ps(&ys[boid] ,_mm256_add_ps(_mm256_loadu_ps(&vys[boid]), _mm256_loadu_ps(&ys[boid])));
+    }
+    */
+    auto t_end = TIME_NOW;
     DEBUG("Non inter :%0.4f", std::chrono::duration<double, std::milli>(t_end-t_start).count()); 
-
 }
 
 inline void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
@@ -1103,7 +1155,7 @@ inline void async_runner(int y, std::future<void> *pool, const BoidMap *boid_map
 }
 
 void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
-    auto t_start = std::chrono::high_resolution_clock::now();
+    auto t_start = TIME_NOW;
 
     #ifndef USE_MULTICORE
 
@@ -1190,11 +1242,11 @@ void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& b
 
     #endif
     
-    auto t_mid = std::chrono::high_resolution_clock::now();
+    auto t_mid = TIME_NOW;
 
     update_non_interacting2(&boid_map, &rules, &boid_list);
 
-    auto t_end = std::chrono::high_resolution_clock::now();
+    auto t_end = TIME_NOW;
 
     DEBUG("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count());
 }
@@ -1270,7 +1322,7 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
                                 .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
                                     auto old_args = ((row_runner_args *)current_task->argument_struct);
                                     update_non_interacting2(old_args->boid_map, old_args->rules, old_args->boid_list);
-                                    task_master->queue_stop_all();
+                                    //task_master->queue_stop_all();
                                     FrameMarkEnd("Update Boids");
                                 }),
                             }
@@ -1309,6 +1361,7 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
 }  
 
 void rebuild_list2(const BoidMap& boid_map, const BoidList& boid_list, rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+    ZoneScoped;
     task_master->lock.lock();
     
     uint32_t tasks_added = 0;
@@ -1353,7 +1406,7 @@ void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera
     BeginDrawing();
         ClearBackground(BLACK);
 
-        auto t_start_3d = std::chrono::high_resolution_clock::now();
+        auto t_start_3d = TIME_NOW;
         //We could cull here by offsetting the start pointers by some amount
         auto const boid_store = boid_list->m_backbuffer;
         int offset = 0;
@@ -1361,7 +1414,7 @@ void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera
             DrawMeshInstanced2(*tri, *matInstances, boid_list->m_size - offset, boid_store->xs + offset, boid_store->ys + offset, boid_store->vxs + offset, boid_store->vys + offset);
         EndMode3D();
 
-        auto t_end_3d = std::chrono::high_resolution_clock::now();
+        auto t_end_3d = TIME_NOW;
 
         //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
         
@@ -1395,10 +1448,9 @@ void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera
     EndDrawing();
 }
 
-
 int main(int argc, char* argv[]) {
-    //num_boids = atoi(argv[1]);
-    uint32_t num_boids = 2000000;
+    uint32_t num_boids = atoi(argv[1]);
+    //uint32_t num_boids = 2000000;
 
     SetTraceLogLevel(LOG_ALL);
 
@@ -1533,6 +1585,7 @@ int main(int argc, char* argv[]) {
             .rules = &rules,
             .arg_store = args_update,
             .boid_list = &boid_list,
+            .index_buffer = index_buffer,
         };
 
         args_rebuild[i] = rebuild_args {
@@ -1561,32 +1614,36 @@ int main(int argc, char* argv[]) {
         };
     }
 
+    bool rebuild = true;
+    
+    TaskMaster task_master;
+    task_master.start_threads();
+
     while (WindowShouldClose() == false){
-        TaskMaster task_master;
 
-        auto t_start = std::chrono::high_resolution_clock::now();
+        auto t_start = TIME_NOW;
         
-        task_master.start_threads();
-
         TaskSync task_populate;
         FrameMarkStart("Map Population");
         populate_map2(boid_list, boid_map, &task_master, &task_populate, args_populate, num_tasks);
         task_populate.wait();
         FrameMarkEnd("Map Population");
 
-        auto t_mid = std::chrono::high_resolution_clock::now();
+        auto t_mid = TIME_NOW;
 
         TaskSync task_rebuild;
         FrameMarkStart("Rebuild List");
         rebuild_list2(boid_map, boid_list, args_rebuild, &task_master, &task_rebuild);
         task_rebuild.wait();
         FrameMarkEnd("Rebuild List");
+        
+        auto t_end = TIME_NOW;
 
-        auto t_end = std::chrono::high_resolution_clock::now();
-        auto t_update_start = std::chrono::high_resolution_clock::now();
+        auto t_update_start = TIME_NOW;
 
         TaskSync task_update;
         FrameMarkStart("Update Boids");
+
         update_boids2(boid_map, args_update, &task_master, &task_update);
 
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
@@ -1629,21 +1686,27 @@ int main(int argc, char* argv[]) {
             camera.target = Vector3 {camera.position.x, 0.f, camera.position.z};
         }
         
-        auto t_start_drawing = std::chrono::high_resolution_clock::now();
+        auto t_start_drawing = TIME_NOW;
         FrameMarkStart("Render");
         render(&boid_list, &boid_map, &ui, rules, cam, camera, &tri, &matInstances);
         FrameMarkEnd("Render");
-        auto t_end_drawing = std::chrono::high_resolution_clock::now();
+        auto t_end_drawing = TIME_NOW;
 
-        task_master.join_all();
-        auto t_update_end = std::chrono::high_resolution_clock::now();
+        task_update.wait();
+        //task_master.join_all();
+
+        auto t_update_end = TIME_NOW;
         
         DEBUG("Populate :%0.4f, rebuild: %0.4f, render: %0.4f, comp: %0.4f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count(), 
         std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_start).count());
         //return 0;
-        
+        rebuild = !rebuild;
+
         FrameMark;
     }
+    
+    task_master.queue_stop_all();
+    task_master.join_all();
     
     rl_CloseWindow();
     return 0;

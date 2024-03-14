@@ -13,7 +13,7 @@ class BoidMap {
         int m_cell_size; 
         Boid *m_boid_map;
         Boid *m_index_buffer;
-        Lock *safety = new Lock[m_xsize * m_ysize];
+        Lock *safety;
 
     public:
         BoidMap() = delete;

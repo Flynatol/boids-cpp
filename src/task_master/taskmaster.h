@@ -13,6 +13,7 @@ struct TaskMaster;
 
 struct TaskSync {
     Lock tc_lock;
+
     volatile int task_counter = 0;
     
     void wait() {
@@ -90,9 +91,7 @@ struct TaskMaster {
 
     void join_all() {
         for (int i = 0; i < num_threads; i++) {
-            //TraceLog(LOG_DEBUG, TextFormat("Joining thread %d", i));
             this->threads[i].join();
-            //TraceLog(LOG_DEBUG, TextFormat("Joined"));
         }
     }
 };

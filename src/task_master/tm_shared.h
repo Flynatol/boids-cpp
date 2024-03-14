@@ -23,6 +23,7 @@ struct row_runner_args {
     Rules *rules; 
     row_runner_args* arg_store;
     BoidList* boid_list;
+    Boid *index_buffer;
 };
 
 struct rebuild_args {
