@@ -40,7 +40,7 @@ const uint16_t SIGHT_RANGE = 100;
 #define BOID_DENSITY_MAGIC_NUMBER 2304.0
 #define USE_MULTICORE 
 
-#define DEBUG_ENABLED
+//#define DEBUG_ENABLED
 
 #ifdef DEBUG_ENABLED
     #define TIME_NOW std::chrono::high_resolution_clock::now()
@@ -300,8 +300,10 @@ void populate_map(BoidList& boid_list, BoidMap& boid_map) {
     }
 }
 
-void populate_map2(const BoidList& boid_list, const BoidMap& boid_map, TaskMaster *task_master, TaskSync *task_monitor, populate_args* arg_list, uint32_t num_tasks) {
-    memset(boid_map.m_boid_map, -1, sizeof(Boid) * boid_map.m_xsize * boid_map.m_ysize);
+void rebuild_list2(const BoidMap* boid_map, const BoidList* boid_list, rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor);
+
+void populate_map2(BoidList* const boid_list, BoidMap* const boid_map, TaskMaster *task_master, TaskSync *task_monitor, populate_args* arg_list, uint32_t num_tasks) {
+    memset(boid_map->m_boid_map, -1, sizeof(Boid) * boid_map->m_xsize * boid_map->m_ysize);
     
     task_master->lock.lock();
     
@@ -314,6 +316,11 @@ void populate_map2(const BoidList& boid_list, const BoidMap& boid_map, TaskMaste
                 .task_type = TaskType::POPULATE,
                 .argument_struct = &arg_list[y],
                 .sync = task_monitor,
+                .on_complete =  (void *) (+[](TaskMaster *task_master, Task *current_task) {
+                    auto old_args = ((populate_args *) current_task->argument_struct);
+                    
+                    rebuild_list2(old_args->boid_map, old_args->boid_list, old_args->rebuild_args, task_master, current_task->sync);
+                }),
             }
         );
 
@@ -1006,7 +1013,6 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
 
 inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules, const BoidList* boid_list) {
     ZoneScoped;
-    auto t_start = TIME_NOW;
     const auto xs = boid_list->m_boid_store->xs;
     const auto ys = boid_list->m_boid_store->ys;
     const auto vxs = boid_list->m_boid_store->vxs;
@@ -1092,8 +1098,6 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
         _mm256_store_ps(&ys[boid] ,_mm256_add_ps(_mm256_loadu_ps(&vys[boid]), _mm256_loadu_ps(&ys[boid])));
     }
     */
-    auto t_end = TIME_NOW;
-    DEBUG("Non inter :%0.4f", std::chrono::duration<double, std::milli>(t_end-t_start).count()); 
 }
 
 inline void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
@@ -1322,7 +1326,10 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
                                 .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
                                     auto old_args = ((row_runner_args *)current_task->argument_struct);
                                     update_non_interacting2(old_args->boid_map, old_args->rules, old_args->boid_list);
-                                    //task_master->queue_stop_all();
+                                    
+                                    //auto test = old_args->pop_args;
+                                    //populate_map2(*old_args->boid_list, boid_map, &task_master, &task_populate, args_populate, num_tasks);
+
                                     FrameMarkEnd("Update Boids");
                                 }),
                             }
@@ -1360,21 +1367,21 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
 
 }  
 
-void rebuild_list2(const BoidMap& boid_map, const BoidList& boid_list, rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+void rebuild_list2(const BoidMap* boid_map, const BoidList* boid_list, rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
     ZoneScoped;
     task_master->lock.lock();
     
     uint32_t tasks_added = 0;
     
     int counter = 0;
-    for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
-        Boid current = boid_map.m_boid_map[i];
+    for (int i = 0; i < boid_map->m_xsize * boid_map->m_ysize; i++) {
+        Boid current = boid_map->m_boid_map[i];
         arg_list->index_buffer[i] = counter;
-        counter += (current != -1) * boid_list.m_boid_store->depth[current];   
+        counter += (current != -1) * boid_list->m_boid_store->depth[current];   
     }
 
     //Generate tasks    
-    for (int y = 0; y < boid_map.m_ysize; y++) {
+    for (int y = 0; y < boid_map->m_ysize; y++) {
         task_master->ts_task_buffer.push_back(
             Task {
                 .task_type = TaskType::REBUILD,
@@ -1394,9 +1401,9 @@ void rebuild_list2(const BoidMap& boid_map, const BoidList& boid_list, rebuild_a
         tasks_added++;
     }
     
-    task_monitor->tc_lock.lock();
+    //task_monitor->tc_lock.lock();
     task_monitor->task_counter += tasks_added;
-    task_monitor->tc_lock.unlock();
+    //task_monitor->tc_lock.unlock();
 
     //Go!
     task_master->lock.unlock();
@@ -1585,7 +1592,7 @@ int main(int argc, char* argv[]) {
             .rules = &rules,
             .arg_store = args_update,
             .boid_list = &boid_list,
-            .index_buffer = index_buffer,
+            //.index_buffer = index_buffer,
         };
 
         args_rebuild[i] = rebuild_args {
@@ -1611,6 +1618,7 @@ int main(int argc, char* argv[]) {
             .start = i * task_size,
             .task_size = std::min(task_size, boid_list.m_size - (i * task_size)),
             .boid_list = &boid_list,
+            .rebuild_args = args_rebuild,
         };
     }
 
@@ -1619,26 +1627,19 @@ int main(int argc, char* argv[]) {
     TaskMaster task_master;
     task_master.start_threads();
 
+    TaskSync task_populate;
+    populate_map2(&boid_list, &boid_map, &task_master, &task_populate, args_populate, num_tasks);
+    task_populate.wait();
+
     while (WindowShouldClose() == false){
 
-        auto t_start = TIME_NOW;
-        
-        TaskSync task_populate;
-        FrameMarkStart("Map Population");
-        populate_map2(boid_list, boid_map, &task_master, &task_populate, args_populate, num_tasks);
-        task_populate.wait();
-        FrameMarkEnd("Map Population");
-
-        auto t_mid = TIME_NOW;
-
+        /*
         TaskSync task_rebuild;
         FrameMarkStart("Rebuild List");
-        rebuild_list2(boid_map, boid_list, args_rebuild, &task_master, &task_rebuild);
+        rebuild_list2(&boid_map, &boid_list, args_rebuild, &task_master, &task_rebuild);
         task_rebuild.wait();
         FrameMarkEnd("Rebuild List");
-        
-        auto t_end = TIME_NOW;
-
+        */
         auto t_update_start = TIME_NOW;
 
         TaskSync task_update;
@@ -1696,8 +1697,16 @@ int main(int argc, char* argv[]) {
         //task_master.join_all();
 
         auto t_update_end = TIME_NOW;
+
+        TaskSync task_populate;
+        FrameMarkStart("Map Population");
+        populate_map2(&boid_list, &boid_map, &task_master, &task_populate, args_populate, num_tasks);
+        task_populate.wait();
+        FrameMarkEnd("Map Population");
         
-        DEBUG("Populate :%0.4f, rebuild: %0.4f, render: %0.4f, comp: %0.4f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count(), 
+        auto t_populate_end = TIME_NOW;
+        
+        DEBUG("Populate :%0.4f, rebuild: na, render: %0.4f, comp: %0.4f", std::chrono::duration<double, std::milli>(t_populate_end- t_update_end).count(), 
         std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_start).count());
         //return 0;
         rebuild = !rebuild;
@@ -1707,7 +1716,7 @@ int main(int argc, char* argv[]) {
     
     task_master.queue_stop_all();
     task_master.join_all();
-    
+
     rl_CloseWindow();
     return 0;
 }

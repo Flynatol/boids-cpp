@@ -17,19 +17,9 @@ struct function3_args {
     const char *text;
 };
 
-struct row_runner_args {
-    BoidMap *boid_map;
-    uint32_t y;
-    Rules *rules; 
-    row_runner_args* arg_store;
-    BoidList* boid_list;
-    Boid *index_buffer;
-};
-
 struct rebuild_args {
     BoidMap *boid_map;
     uint32_t y;
-    //rebuild_args* arg_store;
     Boid *index_buffer;
     BoidList* boid_list;
 };
@@ -39,6 +29,16 @@ struct populate_args {
     uint32_t start;
     uint32_t task_size;
     BoidList* boid_list;
+    rebuild_args* rebuild_args;
+};
+
+struct row_runner_args {
+    BoidMap *boid_map;
+    uint32_t y;
+    Rules *rules; 
+    row_runner_args* arg_store;
+    BoidList* boid_list;
+    populate_args* pop_args;
 };
 
 void doLotsOfWork ();
