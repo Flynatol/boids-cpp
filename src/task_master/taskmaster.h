@@ -10,6 +10,11 @@
 
 struct TaskMaster;
 
+#define NUM_THREADS num_threads
+
+// Num threads doesn't include the main thread -- so we're spawning the hardware thread number -1 for main and -1 for OS stuff.
+const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 2, (uint32_t) 64);
+
 
 struct TaskSync {
     Lock tc_lock;
@@ -43,9 +48,9 @@ struct TaskMaster {
     uint32_t front = 0;
     uint32_t back = 0;
 
-    uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
+    //uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
 
-    RingBuffer<Task, 2048> ts_task_buffer;
+    RingBuffer<Task, 4096> ts_task_buffer;
     std::thread threads[64];
     bool status[64];
 

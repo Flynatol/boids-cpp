@@ -38,6 +38,7 @@ const uint16_t SIGHT_RANGE = 100;
 
 #define FRAME_RATE_LIMIT 165
 #define BOID_DENSITY_MAGIC_NUMBER 2304.0
+#define CELL_WIDTH 100
 #define USE_MULTICORE 
 
 //#define DEBUG_ENABLED
@@ -57,11 +58,11 @@ static const Vector2 triangle[3] = {
     Vector2 {TRIANGLE_SIZE, -2 * TRIANGLE_SIZE}
 };
 
-#define NUM_THREADS num_threads
-
-const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
 
 typedef int32_t Boid;
+
+BoidList* boid_list;
+BoidMap* boid_map;
 
 struct PerfMonitor {
     int tick_counter = 0;
@@ -71,7 +72,7 @@ struct PerfMonitor {
 
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
 
-void write_map_to_list(int i, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+void write_map_to_list(int i, const Boid* index_buffer) {
     auto main_buffer = boid_list->m_boid_store;
     auto back_buffer = boid_list->m_backbuffer;
 
@@ -103,7 +104,7 @@ void write_map_to_list(int i, const Boid* index_buffer, const BoidList *boid_lis
     }
 }
 
-void block_writer(int thread_start_pos, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+void block_writer(int thread_start_pos, const Boid* index_buffer) {
     auto t = thread_start_pos == ((NUM_THREADS - 1) * ((boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS));
     auto correction = (boid_map->m_xsize * boid_map->m_ysize) - (thread_start_pos + ((boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS));
 
@@ -111,29 +112,29 @@ void block_writer(int thread_start_pos, const Boid* index_buffer, const BoidList
     if (t) DEBUG("correction");
 
     for (int i = 0; i < (boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS + t * correction; i++) {
-        write_map_to_list(thread_start_pos + i, index_buffer, boid_list, boid_map);
+        write_map_to_list(thread_start_pos + i, index_buffer);
     }
 }
 
-void jump_writer(int thread_start_pos, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+void jump_writer(int thread_start_pos, const Boid* index_buffer) {
     for (int i = thread_start_pos; i < (boid_map->m_xsize * boid_map->m_ysize); i += NUM_THREADS) {
-        write_map_to_list(i, index_buffer, boid_list, boid_map);
+        write_map_to_list(i, index_buffer);
     }
 }
 
-void write_row_to_list(const uint32_t row, const Boid* index_buffer, const BoidList *boid_list, const BoidMap *boid_map) {
+void write_row_to_list(const uint32_t row, const Boid* index_buffer) {
     ZoneScoped;
     for (int x = 0; x < boid_map->m_xsize; x++) {
-        write_map_to_list(boid_map->m_xsize * row + x, index_buffer, boid_list, boid_map); 
+        write_map_to_list(boid_map->m_xsize * row + x, index_buffer); 
     }
 }
 
 //std::future<void> render_task
-void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
+void rebuild_list() {
     auto t_start = TIME_NOW;
 
-    BoidStore *main_buffer = boid_list.m_boid_store;
-    BoidStore *back_buffer = boid_list.m_backbuffer;
+    BoidStore *main_buffer = boid_list->m_boid_store;
+    BoidStore *back_buffer = boid_list->m_backbuffer;
     
     /*
     int index = 0;
@@ -181,13 +182,13 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
 
     //An array that tells us the index that that the looked up boid should be written to in the new array
-    Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid)); //Weirdly this seems to be the fastest of the following options
+    Boid *index_buffer = (Boid *) malloc(boid_map->m_xsize * boid_map->m_ysize * sizeof(Boid)); //Weirdly this seems to be the fastest of the following options
     //Boid *index_buffer = boid_map.m_index_buffer;
     //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
 
     int counter = 0;
-    for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
-        Boid current = boid_map.m_boid_map[i];
+    for (int i = 0; i < boid_map->m_xsize * boid_map->m_ysize; i++) {
+        Boid current = boid_map->m_boid_map[i];
         index_buffer[i] = counter;
         counter += (current != -1) * main_buffer->depth[current];   
     }
@@ -203,7 +204,7 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
         //int num = i * ((boid_map.m_xsize * boid_map.m_ysize) / NUM_THREADS);
         //threads[i] = std::thread(block_writer, num, (Boid *) index_buffer, &boid_list, &boid_map);
 
-        threads[i] = std::thread(jump_writer, i, (Boid *) index_buffer, &boid_list, &boid_map);
+        threads[i] = std::thread(jump_writer, i, (Boid *) index_buffer);
 
         //pool[i] = std::async(std::launch::async, block_writer, num, (Boid *) index_buffer, &boid_list, &boid_map);
     }
@@ -216,28 +217,30 @@ void rebuild_list(BoidList& boid_list, const BoidMap& boid_map) {
     free(index_buffer);
     delete[] threads;
 
-    boid_list.m_boid_store = back_buffer;
-    boid_list.m_backbuffer = main_buffer;
+    boid_list->m_boid_store = back_buffer;
+    boid_list->m_backbuffer = main_buffer;
 
     auto t_end = TIME_NOW;
 }
 
-inline void place_boid(const BoidMap& map, const BoidList& boid_list, Boid boid_to_place) {
-    Boid map_pos = map.get_map_pos_nearest(boid_list.m_boid_store->xs[boid_to_place], boid_list.m_boid_store->ys[boid_to_place]);
+inline void place_boid(Boid boid_to_place) {
+    Boid map_pos = boid_map->get_map_pos_nearest(boid_list->m_boid_store->xs[boid_to_place], boid_list->m_boid_store->ys[boid_to_place]);
     //DEBUG("placing %d", boid_to_place);
     //DEBUG("trying to lock %d", map_pos);
 
-    map.safety[map_pos].lock();
-        Boid old_head = map.m_boid_map[map_pos];
-        map.m_boid_map[map_pos] = boid_to_place;
-        boid_list.m_boid_store->index_next[boid_to_place] = old_head;
-        boid_list.m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list.m_boid_store->depth[old_head] + 1 : 1;
-    map.safety[map_pos].unlock();
+    boid_map->safety[map_pos].lock();
+
+        Boid old_head = boid_map->m_boid_map[map_pos];
+        boid_map->m_boid_map[map_pos] = boid_to_place;
+        boid_list->m_boid_store->index_next[boid_to_place] = old_head;
+        boid_list->m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list->m_boid_store->depth[old_head] + 1 : 1;
+        
+    boid_map->safety[map_pos].unlock();
     //DEBUG("placed %d", boid_to_place);
 
 }
 
-void block_populate(int thread_start_pos, const BoidList *boid_list, const BoidMap *boid_map) {
+void block_populate(int thread_start_pos) {
     //TODO work out a better fix for this
     //We need to work out a better way to allocate work between threads
 
@@ -245,21 +248,21 @@ void block_populate(int thread_start_pos, const BoidList *boid_list, const BoidM
     auto correction = boid_list->m_size - (thread_start_pos + (boid_list->m_size / NUM_THREADS));
     
     for (int i = 0; i < (boid_list->m_size) / NUM_THREADS + correction * t; i++) {
-        place_boid(*boid_map, *boid_list, thread_start_pos + i);
+        place_boid(thread_start_pos + i);
     }
 }
 
-inline void populate_n(uint32_t start, uint32_t task_size, const BoidList *boid_list, const BoidMap *boid_map) {
+inline void populate_n(uint32_t start, uint32_t task_size) {
     ZoneScoped;
     for (uint32_t i = start; i < start + task_size; i++) {
-        place_boid(*boid_map, *boid_list, i);
+        place_boid(i);
     }
 }
 
 
-void populate_map(BoidList& boid_list, BoidMap& boid_map) {
+void populate_map() {
     
-    memset(boid_map.m_boid_map, -1, sizeof(Boid) * boid_map.m_xsize * boid_map.m_ysize);
+    memset(boid_map->m_boid_map, -1, sizeof(Boid) * boid_map->m_xsize * boid_map->m_ysize);
 
     //TODO: slight problem here is that we are WILL reverse the memory positions in each cell each update.
     //Maybe we can fix this writing into the new list in reverse order in the rebuild list function (Use the depth to work out correct positions).
@@ -285,14 +288,14 @@ void populate_map(BoidList& boid_list, BoidMap& boid_map) {
     //Alternatively alternatively we can just space out a lot and hope. (this probably isn't as terrible as it sounds) 
 
     //std::thread threads[NUM_THREADS];
-    auto safety = new Lock[boid_map.m_xsize * boid_map.m_ysize] ;
+    auto safety = new Lock[boid_map->m_xsize * boid_map->m_ysize] ;
 
     std::vector<std::future<void>> pool;
     pool.resize(NUM_THREADS);
     
     for (int i = 0; i < NUM_THREADS; i++) {
-        int num = i * (boid_list.m_size / NUM_THREADS);
-        pool[i] = std::async(std::launch::async, block_populate, num, &boid_list, &boid_map);
+        int num = i * (boid_list->m_size / NUM_THREADS);
+        pool[i] = std::async(std::launch::async, block_populate, num);
     }
     
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -300,13 +303,11 @@ void populate_map(BoidList& boid_list, BoidMap& boid_map) {
     }
 }
 
-void rebuild_list2(const BoidMap* boid_map, const BoidList* boid_list, rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor);
+void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor);
 
-void populate_map2(BoidList* const boid_list, BoidMap* const boid_map, TaskMaster *task_master, TaskSync *task_monitor, populate_args* arg_list, uint32_t num_tasks) {
+void populate_map2(TaskMaster *task_master, TaskSync *task_monitor, populate_args* arg_list, uint32_t num_tasks) {
     memset(boid_map->m_boid_map, -1, sizeof(Boid) * boid_map->m_xsize * boid_map->m_ysize);
-    
     task_master->lock.lock();
-    
     uint32_t tasks_added = 0;
   
     //Generate tasks    
@@ -319,7 +320,6 @@ void populate_map2(BoidList* const boid_list, BoidMap* const boid_map, TaskMaste
                 .on_complete =  (void *) (+[](TaskMaster *task_master, Task *current_task) {
                     auto old_args = ((populate_args *) current_task->argument_struct);
                     
-                    rebuild_list2(old_args->boid_map, old_args->boid_list, old_args->rebuild_args, task_master, current_task->sync);
                 }),
             }
         );
@@ -327,9 +327,9 @@ void populate_map2(BoidList* const boid_list, BoidMap* const boid_map, TaskMaste
         tasks_added++;
     }
     
-    task_monitor->tc_lock.lock();
+    //task_monitor->tc_lock.lock();
     task_monitor->task_counter += tasks_added;
-    task_monitor->tc_lock.unlock();
+    //task_monitor->tc_lock.unlock();
 
     //Go!
     task_master->lock.unlock();
@@ -1067,23 +1067,23 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
         const auto home_loc_x_vec = _mm256_fmadd_ps(home_index_x_vec, x_const, ew);
         const auto home_loc_y_vec = _mm256_fmadd_ps(home_index_y_vec, y_const, ew);
 
-        const auto store_x = _mm256_loadu_ps(&xs[boid]);
-        const auto store_y = _mm256_loadu_ps(&ys[boid]);
+        const auto store_x = _mm256_load_ps(&xs[boid]);
+        const auto store_y = _mm256_load_ps(&ys[boid]);
 
         const auto dx_vec = _mm256_sub_ps(home_loc_x_vec, store_x);
         const auto dy_vec = _mm256_sub_ps(home_loc_y_vec, store_y);
 
-        const auto vxs_vec = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), _mm256_loadu_ps(&vxs[boid]));
-        const auto vys_vec = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), _mm256_loadu_ps(&vys[boid]));
+        const auto vxs_vec = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), _mm256_load_ps(&vxs[boid]));
+        const auto vys_vec = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), _mm256_load_ps(&vys[boid]));
 
-        _mm256_storeu_ps(&vxs[boid], vxs_vec);
-        _mm256_storeu_ps(&vys[boid], vys_vec);
+        _mm256_store_ps(&vxs[boid], vxs_vec);
+        _mm256_store_ps(&vys[boid], vys_vec);
 
         const auto xs_out = _mm256_add_ps(store_x, vxs_vec);
         const auto ys_out = _mm256_add_ps(store_y, vys_vec);
 
-        _mm256_storeu_ps(&xs[boid], xs_out);
-        _mm256_storeu_ps(&ys[boid], ys_out);
+        _mm256_store_ps(&xs[boid], xs_out);
+        _mm256_store_ps(&ys[boid], ys_out);
     }
     
     /*
@@ -1100,7 +1100,7 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
     */
 }
 
-inline void row_runner(const BoidMap *boid_map, const int y, const Rules *rules, const BoidList *boid_list) {
+inline void row_runner(const int y, const Rules *rules) {
     ZoneScoped;
     for (int x = 0; x < boid_map->m_xsize; x++) {
         update_cell2(boid_map, x, y, rules, boid_list);
@@ -1143,7 +1143,7 @@ void block_runner_unstable(int y, const BoidMap *boid_map, const Rules *rules, c
 //Stripes allocations to each thread (hopefully more cache local)
 inline void jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int y = thread_num * 2 + offset; y < boid_map->m_ysize; y += 2 * NUM_THREADS) {
-        row_runner(boid_map, y, rules, boid_list);
+        row_runner(y, rules);
     }
 }
 
@@ -1263,19 +1263,19 @@ void runner(TaskMaster *task_master, uint8_t thread_id) {
         switch (current_task.task_type) {
             case TaskType::ROW_RUNNER_PASS_ONE: {
                     auto s = ((row_runner_args *) current_task.argument_struct);
-                    row_runner(s->boid_map, s->y, s->rules, s->boid_list);
+                    row_runner(s->y, s->rules);
                 }
                 break;
             
             case TaskType::REBUILD: {
                     auto s = ((rebuild_args *) current_task.argument_struct);
-                    write_row_to_list(s->y, s->index_buffer, s->boid_list, s->boid_map);
+                    write_row_to_list(s->y, s->index_buffer);
                 }
                 break;
             
             case TaskType::POPULATE: {
                     auto s = ((populate_args *) current_task.argument_struct);
-                    populate_n(s->start, s->task_size, s->boid_list, s->boid_map);
+                    populate_n(s->start, s->task_size);
                 }   
                 break;
                 
@@ -1297,7 +1297,7 @@ void runner(TaskMaster *task_master, uint8_t thread_id) {
     }
 }
 
-void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
     //  Add tasks to task master
     //  Spin up some threads
     //  Let em go
@@ -1305,7 +1305,7 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
     
     uint32_t tasks_added = 0;
         
-    for (int y = 0; y < boid_map.m_ysize; y += 2) {
+    for (int y = 0; y < boid_map->m_ysize; y += 2) {
         task_master->ts_task_buffer.push_back(
             Task {
                 .task_type = TaskType::ROW_RUNNER_PASS_ONE,
@@ -1317,7 +1317,7 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
                     uint32_t tasks_added = 0;
                     task_master->lock.lock();
 
-                    for (int y = 1; y < old_args->boid_map->m_ysize; y += 2) {
+                    for (int y = 1; y < boid_map->m_ysize; y += 2) {
                         task_master->ts_task_buffer.push_back(
                             Task {
                                 .task_type = TaskType::ROW_RUNNER_PASS_ONE,
@@ -1325,10 +1325,8 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
                                 .sync = current_task->sync,
                                 .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
                                     auto old_args = ((row_runner_args *)current_task->argument_struct);
-                                    update_non_interacting2(old_args->boid_map, old_args->rules, old_args->boid_list);
-                                    
-                                    //auto test = old_args->pop_args;
-                                    //populate_map2(*old_args->boid_list, boid_map, &task_master, &task_populate, args_populate, num_tasks);
+                                    update_non_interacting2(boid_map, old_args->rules, boid_list);
+                                    populate_map2(task_master, current_task->sync, old_args->pop_args, old_args->pop_args->num_tasks);
 
                                     FrameMarkEnd("Update Boids");
                                 }),
@@ -1346,18 +1344,6 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
         tasks_added++;
     }
     
-    /*
-    for (int i = 0; i < NUM_THREADS; i++) {
-        task_master->ts_task_buffer.push_back(
-            Task {
-                .task_type = TaskType::STOP,
-                .argument_struct = NULL,
-                .sync = NULL,
-                .on_complete = NULL,
-            }
-        );
-    }
-    */
     task_monitor->tc_lock.lock();
     task_monitor->task_counter += tasks_added;
     task_monitor->tc_lock.unlock();
@@ -1367,7 +1353,7 @@ void update_boids2(const BoidMap& boid_map, row_runner_args* arg_list, TaskMaste
 
 }  
 
-void rebuild_list2(const BoidMap* boid_map, const BoidList* boid_list, rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
     ZoneScoped;
     task_master->lock.lock();
     
@@ -1391,9 +1377,9 @@ void rebuild_list2(const BoidMap* boid_map, const BoidList* boid_list, rebuild_a
                         auto old_args = ((rebuild_args *) current_task->argument_struct);
 
                         //Flip buffers
-                        auto temp_boid_store = old_args->boid_list->m_boid_store;
-                        old_args->boid_list->m_boid_store = old_args->boid_list->m_backbuffer;
-                        old_args->boid_list->m_backbuffer = temp_boid_store;
+                        auto temp_boid_store = boid_list->m_boid_store;
+                        boid_list->m_boid_store = boid_list->m_backbuffer;
+                        boid_list->m_backbuffer = temp_boid_store;
                     }),
             }  
         );
@@ -1409,7 +1395,8 @@ void rebuild_list2(const BoidMap* boid_map, const BoidList* boid_list, rebuild_a
     task_master->lock.unlock();
 }   
 
-void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
+void render(Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
+    ZoneScoped;
     BeginDrawing();
         ClearBackground(BLACK);
 
@@ -1424,7 +1411,7 @@ void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera
         auto t_end_3d = TIME_NOW;
 
         //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
-        
+        #ifdef CAMERA_2d
         BeginMode2D(cam);
             /*
             Boid current = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
@@ -1449,7 +1436,7 @@ void render(BoidList *boid_list, BoidMap *boid_map, Ui *ui, Rules &rules, Camera
                 }
             }
         EndMode2D();
-        
+        #endif
         ui->Render(cam, camera, rules);
 
     EndDrawing();
@@ -1499,7 +1486,7 @@ int main(int argc, char* argv[]) {
     matInstances.shader = boid_shader;
     matInstances.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
-    BoidList boid_list(num_boids);
+    
 
     Rules rules = {
         .avoid_distance_squared = 1000.f,
@@ -1511,7 +1498,7 @@ int main(int argc, char* argv[]) {
         .edge_width = 300,
         .edge_factor = 0.05,
         .rand = 0.1,
-        .homing = 0.0000051,
+        .homing = 0.0000005,
         .show_lines = false,
         .min_speed = 2,
         .max_speed = 3,
@@ -1539,9 +1526,11 @@ int main(int argc, char* argv[]) {
         .projection = CAMERA_ORTHOGRAPHIC,                      
     };
     
-    const int CELL_WIDTH = 100;
-    //assert(CELL_WIDTH >= rules.sight_range);
-    BoidMap boid_map(world_height, world_width, CELL_WIDTH);
+    BoidList boid_list_local(num_boids);
+    BoidMap boid_map_local(world_height, world_width, CELL_WIDTH);
+
+    boid_list = &boid_list_local;
+    boid_map = &boid_map_local;
 
     std::srand(std::time(nullptr));
     
@@ -1555,21 +1544,21 @@ int main(int argc, char* argv[]) {
     std::uniform_real_distribution<float> height_distribution2 (-home_height / 2.f, home_height / 2.f);
 
     //Populate some test boids
-    for (int i = 0; i < boid_list.m_size; i++) {
-        boid_list.m_boid_store->index_next[i] = -1;
-        boid_list.m_boid_store->vxs[i] = (std::rand() % 3) - 1;
-        boid_list.m_boid_store->vys[i] = (std::rand() % 3) - 1;
-        boid_list.m_boid_store->homes[i] = rand() % 144;
+    for (int i = 0; i < boid_list->m_size; i++) {
+        boid_list->m_boid_store->index_next[i] = -1;
+        boid_list->m_boid_store->vxs[i] = (std::rand() % 3) - 1;
+        boid_list->m_boid_store->vys[i] = (std::rand() % 3) - 1;
+        boid_list->m_boid_store->homes[i] = rand() % 144;
 
-        int home_index_y = boid_list.m_boid_store->homes[i] / 16;
-        int home_index_x = boid_list.m_boid_store->homes[i] % 16;
+        int home_index_y = boid_list->m_boid_store->homes[i] / 16;
+        int home_index_x = boid_list->m_boid_store->homes[i] % 16;
 
-        boid_list.m_boid_store->xs[i] = (home_index_x + 1) * home_width  + rules.edge_width + width_distribution2(generator);
-        boid_list.m_boid_store->ys[i] = (home_index_y + 1) * home_height + rules.edge_width + height_distribution2(generator);
+        boid_list->m_boid_store->xs[i] = (home_index_x + 1) * home_width  + rules.edge_width + width_distribution2(generator);
+        boid_list->m_boid_store->ys[i] = (home_index_y + 1) * home_height + rules.edge_width + height_distribution2(generator);
     }
 
 
-    populate_map(boid_list, boid_map);
+    populate_map();
 
     /*
     auto xs = boid_list.m_boid_store->xs;
@@ -1580,47 +1569,41 @@ int main(int argc, char* argv[]) {
     auto index_nexts = boid_list.m_boid_store->index_next;
     */
 
-    auto args_update = new row_runner_args[boid_map.m_ysize];
-    auto args_rebuild = new rebuild_args[boid_map.m_ysize];
+    //This number was found through experimentation, might not be optimal for all number of boids (10000)
+    const uint32_t task_size = 10000;
+    const uint32_t num_tasks = (boid_list->m_size + (task_size - 1)) / task_size; //to force rounding up
+    populate_args *args_populate = new populate_args[num_tasks];
 
-    Boid *index_buffer = (Boid *) malloc(boid_map.m_xsize * boid_map.m_ysize * sizeof(Boid));
 
-    for (uint32_t i = 0; i < boid_map.m_ysize; i++) {
+    auto args_update = new row_runner_args[boid_map->m_ysize];
+    auto args_rebuild = new rebuild_args[boid_map->m_ysize];
+
+    Boid *index_buffer = (Boid *) malloc(boid_map->m_xsize * boid_map->m_ysize * sizeof(Boid));
+
+    for (uint32_t i = 0; i < boid_map->m_ysize; i++) {
         args_update[i] = row_runner_args {
-            .boid_map = &boid_map,
             .y = i,
             .rules = &rules,
             .arg_store = args_update,
-            .boid_list = &boid_list,
-            //.index_buffer = index_buffer,
+            .pop_args = args_populate,
         };
 
         args_rebuild[i] = rebuild_args {
-            .boid_map = &boid_map,
             .y = i,
             .index_buffer = index_buffer,
-            .boid_list = &boid_list,
         };   
     }
-    
-    //This number was found through experimentation, might not be optimal for all number of boids (10000)
-    const uint32_t task_size = 10000;
-    const uint32_t num_tasks = (boid_list.m_size + (task_size - 1)) / task_size; //to force rounding up
-    populate_args *args_populate = new populate_args[num_tasks];
 
     DEBUG("Num tasks: %d", num_tasks);
 
-    uint32_t santiy = 0;
-
     for (uint32_t i = 0; i < num_tasks; i++) {
         args_populate[i] = populate_args {
-            .boid_map = &boid_map,
             .start = i * task_size,
-            .task_size = std::min(task_size, boid_list.m_size - (i * task_size)),
-            .boid_list = &boid_list,
+            .task_size = std::min(task_size, boid_list->m_size - (i * task_size)),
             .rebuild_args = args_rebuild,
         };
     }
+    args_populate[0].num_tasks = num_tasks;
 
     bool rebuild = true;
     
@@ -1628,9 +1611,22 @@ int main(int argc, char* argv[]) {
     task_master.start_threads();
 
     TaskSync task_populate;
-    populate_map2(&boid_list, &boid_map, &task_master, &task_populate, args_populate, num_tasks);
+    populate_map2(&task_master, &task_populate, args_populate, num_tasks);
     task_populate.wait();
 
+
+    TaskSync task_update;
+
+    TaskSync task_rebuild;
+    rebuild_list2(args_rebuild, &task_master, &task_rebuild);
+    task_rebuild.wait();
+
+    FrameMarkStart("Update Boids");
+    update_boids2(args_update, &task_master, &task_update);
+    task_update.wait();
+    
+
+    DEBUG("Starting main loop");
     while (WindowShouldClose() == false){
 
         /*
@@ -1642,14 +1638,7 @@ int main(int argc, char* argv[]) {
         */
         auto t_update_start = TIME_NOW;
 
-        TaskSync task_update;
         FrameMarkStart("Update Boids");
-
-        update_boids2(boid_map, args_update, &task_master, &task_update);
-
-        float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
-        SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
-
         
         //TODO move camera stuff to class
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)){
@@ -1686,30 +1675,43 @@ int main(int argc, char* argv[]) {
 
             camera.target = Vector3 {camera.position.x, 0.f, camera.position.z};
         }
-        
+
+        // Update camera position in shader
+        float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
+        SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
+
+        task_rebuild.wait();   
+
+        update_boids2(args_update, &task_master, &task_update);
+
         auto t_start_drawing = TIME_NOW;
         FrameMarkStart("Render");
-        render(&boid_list, &boid_map, &ui, rules, cam, camera, &tri, &matInstances);
+        render(&ui, rules, cam, camera, &tri, &matInstances);
         FrameMarkEnd("Render");
         auto t_end_drawing = TIME_NOW;
 
         task_update.wait();
+
+        // Rendering and new state now done -- Flipping buffer allowed
+        rebuild_list2(args_rebuild, &task_master, &task_rebuild);
+
+             
+
         //task_master.join_all();
 
         auto t_update_end = TIME_NOW;
 
-        TaskSync task_populate;
-        FrameMarkStart("Map Population");
-        populate_map2(&boid_list, &boid_map, &task_master, &task_populate, args_populate, num_tasks);
-        task_populate.wait();
-        FrameMarkEnd("Map Population");
+        //TaskSync task_populate;
+        //FrameMarkStart("Map Population");
+        //populate_map2(&task_master, &task_populate, args_populate, num_tasks);
+        //task_populate.wait();
+        //FrameMarkEnd("Map Population");
         
         auto t_populate_end = TIME_NOW;
         
         DEBUG("Populate :%0.4f, rebuild: na, render: %0.4f, comp: %0.4f", std::chrono::duration<double, std::milli>(t_populate_end- t_update_end).count(), 
         std::chrono::duration<double, std::milli>(t_end_drawing-t_start_drawing).count(), std::chrono::duration<double, std::milli>(t_update_end-t_update_start).count());
         //return 0;
-        rebuild = !rebuild;
 
         FrameMark;
     }
@@ -1727,6 +1729,7 @@ int main(int argc, char* argv[]) {
 // We can then use these to generate the transformation matricies on the GPU instead.
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy)
 {
+    FrameMarkStart("Begin Render");
     #define MAX_MATERIAL_MAPS 12
     #define MAX_MESH_VERTEX_BUFFERS 7
 
@@ -1767,6 +1770,8 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     // Enable mesh VAO to attach new buffer
     rlEnableVertexArray(mesh.vaoId);
 
+    FrameMarkEnd("Begin Render");
+    FrameMarkStart("Upload");
     instances_boid_x_ID = rlLoadVertexBuffer(boid_x, instances*sizeof(float), false);
     rlEnableVertexAttribute(material.shader.locs[26]);
     rlSetVertexAttribute(material.shader.locs[26], 1, RL_FLOAT, false, sizeof(float), 0);
@@ -1787,8 +1792,11 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     rlSetVertexAttribute(material.shader.locs[29], 1, RL_FLOAT, false, sizeof(float), 0);
     rlSetVertexAttributeDivisor(material.shader.locs[29], 1);
     
-    rlDisableVertexBuffer();
-    rlDisableVertexArray();
+    //rlDisableVertexBuffer();
+    //rlDisableVertexArray();
+
+    FrameMarkEnd("Upload");
+    FrameMarkStart("End Render");
 
     // Accumulate internal matrix transform (push/pop) and view matrix
     // NOTE: In this case, model instance transformation must be computed in the shader
@@ -1805,6 +1813,7 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
 
     // Draw mesh instanced
     rlDrawVertexArrayInstanced(0, mesh.vertexCount, instances);
+    
     
     // Unbind all bound texture maps
     for (int i = 0; i < MAX_MATERIAL_MAPS; i++)
@@ -1836,4 +1845,6 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     rlUnloadVertexBuffer(instances_boid_y_ID);
     rlUnloadVertexBuffer(instances_boid_vx_ID);
     rlUnloadVertexBuffer(instances_boid_vy_ID);
+
+    FrameMarkEnd("End Render");
 }

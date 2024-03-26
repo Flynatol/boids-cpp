@@ -18,26 +18,21 @@ struct function3_args {
 };
 
 struct rebuild_args {
-    BoidMap *boid_map;
     uint32_t y;
     Boid *index_buffer;
-    BoidList* boid_list;
 };
 
 struct populate_args {
-    BoidMap *boid_map;
     uint32_t start;
     uint32_t task_size;
-    BoidList* boid_list;
     rebuild_args* rebuild_args;
+    uint32_t num_tasks;
 };
 
 struct row_runner_args {
-    BoidMap *boid_map;
     uint32_t y;
     Rules *rules; 
     row_runner_args* arg_store;
-    BoidList* boid_list;
     populate_args* pop_args;
 };
 
