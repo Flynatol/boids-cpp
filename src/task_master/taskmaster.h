@@ -15,6 +15,7 @@ struct TaskMaster;
 // Num threads doesn't include the main thread -- so we're spawning the hardware thread number -1 for main and -1 for OS stuff.
 const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 2, (uint32_t) 64);
 
+BOOLEAN nanosleep(LONGLONG ns);
 
 struct TaskSync {
     Lock tc_lock;
@@ -49,10 +50,12 @@ struct TaskMaster {
     uint32_t back = 0;
 
     //uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
+    
+    // To be used by dynamic performance scaler
+    bool sleep_enabled = true;
 
     RingBuffer<Task, 4096> ts_task_buffer;
     std::thread threads[64];
-    bool status[64];
 
     Lock lock;
 
@@ -68,7 +71,8 @@ struct TaskMaster {
         this->lock.lock();
             if (!(this->ts_task_buffer.pop_front(task))) {
                 this->lock.unlock();
-                std::this_thread::yield();
+                //std::this_thread::yield();
+                if (sleep_enabled) nanosleep(10000);
                 goto try_lock;
             }
         this->lock.unlock();
@@ -80,7 +84,6 @@ struct TaskMaster {
     void start_threads() {
         for (int i = 0; i < num_threads; i++) {
             threads[i] = std::thread(runner, this, i);
-            status[i] = true;
         }
     }
 

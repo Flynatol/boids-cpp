@@ -26,7 +26,6 @@ class Ui {
 
         void Render(Camera2D &cam, Camera &camera, Rules &rules);
 
-
     private:
         void UpdateCameraWindow2d(Camera2D &cam);
 

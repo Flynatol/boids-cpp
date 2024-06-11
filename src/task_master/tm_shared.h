@@ -8,8 +8,7 @@
 enum TaskType {
     POPULATE,
     REBUILD,
-    ROW_RUNNER_PASS_ONE,
-    ROW_RUNNER_PASS_TWO,
+    ROW_RUNNER,
     STOP,
 };
 
@@ -35,8 +34,3 @@ struct row_runner_args {
     row_runner_args* arg_store;
     populate_args* pop_args;
 };
-
-void doLotsOfWork ();
-
-void function3(uint8_t thread_id, const char *string);
-

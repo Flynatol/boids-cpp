@@ -2,7 +2,6 @@
 
 // Input vertex attributes
 in vec3 vertexPosition;
-in vec4 vertexColor;
 
 in float boid_x;
 in float boid_y;
@@ -15,9 +14,6 @@ uniform mat4 mvp;
 // Output vertex attributes (to fragment shader)
 out vec3 fragPosition;
 out vec4 fragColor;
-
-#define PI 3.1415926538
-
 
 void main() {
     float angle = atan(boid_vx, boid_vy);
@@ -32,15 +28,9 @@ void main() {
     // Compute MVP for current instance
     mat4 mvpi = mvp*it2;
     
-    
     // Send vertex attributes to fragment shader
     fragPosition = vec3(mvpi*vec4(vertexPosition, 1.0));
-    //fragColor = vertexColor;
-
-    //fragColor = vec4(boid_x/(2560*8), boid_y/(2560*8), 1.0, 1.0);
     fragColor = vec4((boid_vx+3)/6, boid_vy+3/6, 0.5, 1.0);
-
-    //fragColor = vec4(0.5, 1.0, 1.0, 1.0);
 
     // Calculate final vertex position
     gl_Position = mvpi*vec4(vertexPosition, 1.0);

@@ -1,14 +1,14 @@
-#include "ui.h"
-#include "imgui.h"
-
 #define NO_FONT_AWESOME
-#include <rlImGui.h>
+
+#include "ui.h"
+#include "rlImGui.h"
+#include "imgui.h"
 
 Ui::Ui() {
     rlImGuiSetup(true);
 }
 
-void Ui::Render(Camera2D &cam, Camera &camera, Rules &rules) {
+void Ui::Render(Camera2D &cam, Camera &camera, Rules &rules) {  
     rlImGuiBegin();
         this->UpdateRulesWindow(rules);
         this->UpdatePerfMonitor();
@@ -17,7 +17,7 @@ void Ui::Render(Camera2D &cam, Camera &camera, Rules &rules) {
     rlImGuiEnd();
 }
 
-void Ui::UpdateRulesWindow(Rules &rules) {
+void Ui::UpdateRulesWindow(Rules &rules) {  
     ImGui::Begin("Boids Settings");
     ImGui::SliderFloat("alignment_factor", &rules.alignment_factor, 0., 1., "%0.9f");
     ImGui::SliderFloat("sight_range", &rules.sight_range, 0., 100., "%0.9f");
@@ -41,6 +41,7 @@ void Ui::UpdatePerfMonitor() {
 }
 
 void Ui::UpdateCameraWindow(Camera &camera){
+    
     ImGui::Begin("Camera Settings");
     ImGui::SliderFloat("x", &camera.position.x, -1000., 1000., "%0.9f");
     ImGui::SliderFloat("y", &camera.position.y, -1000., 1000., "%0.9f");

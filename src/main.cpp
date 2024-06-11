@@ -1,7 +1,8 @@
 #include <iostream>
 #include <raylib.h>
+
+
 #include <raymath.h>
-#include <rlgl.h>
 #include <cstdint>
 #include <array>
 #include <vector>
@@ -23,11 +24,22 @@
 #include "boidmap.h"
 #include "ui.h"
 
+
 #include ".\task_master\taskmaster.h"
 #include ".\task_master\tm_shared.h"
 
+
+
+#include <glad/glad.h>
+
+//#include <GL/gl.h>
+//#define RLGL_IMPLEMENTATION
+
+#include "rlgl.h"
+
+
 #define TRACY_CALLSTACK 32
-#include ".\tracy\tracy\Tracy.hpp"
+#include "Tracy.hpp"
 
 #pragma comment(lib, "Winmm.lib")
 
@@ -66,21 +78,21 @@ BoidMap* boid_map;
 
 struct PerfMonitor {
     int tick_counter = 0;
-    float tps;
-    float rolling_average;
+    float tps = 0;
+    float rolling_average = 0;
 } typedef PerfMonitor;
 
 void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid_x, float *boid_y, float *boid_vx, float *boid_vy);
 
-void write_map_to_list(int i, const Boid* index_buffer) {
+inline void write_map_to_list(int map_cell, const Boid* index_buffer) {
     auto main_buffer = boid_list->m_boid_store;
     auto back_buffer = boid_list->m_backbuffer;
 
-    int index = index_buffer[i];
-    Boid current = boid_map->get_absolute(i);
+    Boid index = index_buffer[map_cell];
+    Boid current = boid_map->m_boid_map[map_cell];
 
     if (current != -1) {
-        boid_map->m_boid_map[i] = index;
+        boid_map->m_boid_map[map_cell] = index;
     }
     
     while (current != -1) {
@@ -104,125 +116,45 @@ void write_map_to_list(int i, const Boid* index_buffer) {
     }
 }
 
-void block_writer(int thread_start_pos, const Boid* index_buffer) {
-    auto t = thread_start_pos == ((NUM_THREADS - 1) * ((boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS));
-    auto correction = (boid_map->m_xsize * boid_map->m_ysize) - (thread_start_pos + ((boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS));
-
-    t = false;
-    if (t) DEBUG("correction");
-
-    for (int i = 0; i < (boid_map->m_xsize * boid_map->m_ysize) / NUM_THREADS + t * correction; i++) {
-        write_map_to_list(thread_start_pos + i, index_buffer);
-    }
-}
-
-void jump_writer(int thread_start_pos, const Boid* index_buffer) {
-    for (int i = thread_start_pos; i < (boid_map->m_xsize * boid_map->m_ysize); i += NUM_THREADS) {
-        write_map_to_list(i, index_buffer);
-    }
-}
-
 void write_row_to_list(const uint32_t row, const Boid* index_buffer) {
     ZoneScoped;
-    for (int x = 0; x < boid_map->m_xsize; x++) {
-        write_map_to_list(boid_map->m_xsize * row + x, index_buffer); 
+    for (int x = 0; x < boid_map->m_xsize; x+=2) {
+        write_map_to_list(boid_map->m_xsize * row + x, index_buffer);
+        write_map_to_list(boid_map->m_xsize * row + x + 1, index_buffer); 
     }
 }
+/*
+void duffs_write_row_to_list(const uint32_t row, const Boid* index_buffer) {
+    ZoneScoped;
+    for (int x = 0; x < boid_map->m_xsize; x+=8) {
+        //switch ()
+        write_map_to_list(boid_map->m_xsize * row + x + 7, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 6, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 5, index_buffer);
+        write_map_to_list(boid_map->m_xsize * row + x + 4, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 3, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 2, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 1, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 0, index_buffer);
+    }
 
-//std::future<void> render_task
-void rebuild_list() {
-    auto t_start = TIME_NOW;
-
-    BoidStore *main_buffer = boid_list->m_boid_store;
-    BoidStore *back_buffer = boid_list->m_backbuffer;
-    
-    /*
-    int index = 0;
-    //Go through every cell in the map (find every head node)
-    for (int i = 0; i < boid_map.m_xsize * boid_map.m_ysize; i++) {
-        //Set current to the head node of the current cell (i)
-        Boid current = boid_map.get_absolute(i);
-        
-        //Then update the position in the map to the new position of this head node
-        if (current != -1) {
-            boid_map.m_boid_map[i] = index;
+    int count = boid_map->m_xsize;
+    {
+        int n = (count + 7) / 8;
+        switch (count % 8) {
+        case 0: do { *to = *from++;
+        case 7:      *to = *from++;
+        case 6:      *to = *from++;
+        case 5:      *to = *from++;
+        case 4:      *to = *from++;
+        case 3:      *to = *from++;
+        case 2:      *to = *from++;
+        case 1:      *to = *from++;
+                } while (--n > 0);
         }
-        
-        while (current != -1) {
-            back_buffer->xs[index] = main_buffer->xs[current];
-            back_buffer->ys[index] = main_buffer->ys[current];
-            back_buffer->vxs[index] = main_buffer->vxs[current];
-            back_buffer->vys[index] = main_buffer->vys[current];
-            back_buffer->homes[index] = main_buffer->homes[current];
-            back_buffer->depth[index] = main_buffer->depth[current];
-
-            Boid next = main_buffer->index_next[current];
-            
-            if (next != -1) {
-                back_buffer->index_next[index] = index + 1;
-            } else {
-                back_buffer->index_next[index] = -1;
-            }
-            
-            current = next;
-            index++;
-        }        
     }
-
-    boid_list.m_boid_store = back_buffer;
-    boid_list.m_backbuffer = main_buffer;
-
-    return;
-    */
-
-    // NEW PLAN
-    // ONE PASS to store index to write to in new list for each cell
-    // THEN USE MT to update the list from many points at once.
-
-    //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
-
-    //An array that tells us the index that that the looked up boid should be written to in the new array
-    Boid *index_buffer = (Boid *) malloc(boid_map->m_xsize * boid_map->m_ysize * sizeof(Boid)); //Weirdly this seems to be the fastest of the following options
-    //Boid *index_buffer = boid_map.m_index_buffer;
-    //Boid index_buffer[boid_map.m_xsize * boid_map.m_ysize];
-
-    int counter = 0;
-    for (int i = 0; i < boid_map->m_xsize * boid_map->m_ysize; i++) {
-        Boid current = boid_map->m_boid_map[i];
-        index_buffer[i] = counter;
-        counter += (current != -1) * main_buffer->depth[current];   
-    }
-
-    auto t_mid = TIME_NOW;
-
-    //std::vector<std::future<void>> pool;
-    //pool.resize(NUM_THREADS);
-
-    std::thread* threads = new std::thread[NUM_THREADS];
-    
-    for (int i = 0; i < NUM_THREADS; i++) {
-        //int num = i * ((boid_map.m_xsize * boid_map.m_ysize) / NUM_THREADS);
-        //threads[i] = std::thread(block_writer, num, (Boid *) index_buffer, &boid_list, &boid_map);
-
-        threads[i] = std::thread(jump_writer, i, (Boid *) index_buffer);
-
-        //pool[i] = std::async(std::launch::async, block_writer, num, (Boid *) index_buffer, &boid_list, &boid_map);
-    }
-    
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threads[i].join();
-        //pool[i].wait();
-    }
-    
-    free(index_buffer);
-    delete[] threads;
-
-    boid_list->m_boid_store = back_buffer;
-    boid_list->m_backbuffer = main_buffer;
-
-    auto t_end = TIME_NOW;
 }
-
+*/
 inline void place_boid(Boid boid_to_place) {
     Boid map_pos = boid_map->get_map_pos_nearest(boid_list->m_boid_store->xs[boid_to_place], boid_list->m_boid_store->ys[boid_to_place]);
     //DEBUG("placing %d", boid_to_place);
@@ -409,259 +341,17 @@ static Mesh GenMeshCustom()
     return mesh;
 }
 
-inline void update_cell(const BoidMap& map, const int x, const int y, const Rules& rules, Boid selected_boid, const BoidList& boid_list) {
-    Boid cell_to_update = map.get_coord(y, x);
-    if (cell_to_update == -1 ) return;
 
-    const auto xs = boid_list.m_boid_store->xs;
-    const auto ys = boid_list.m_boid_store->ys;
-    const auto vxs = boid_list.m_boid_store->vxs;
-    const auto vys = boid_list.m_boid_store->vys;
-    
-    Boid cell_begin = cell_to_update;
-    Boid cell_end = cell_begin + boid_list.m_boid_store->depth[cell_begin];
+inline void update_cell2(const int x, const int y, const Rules *rules, const BoidList *boid_list) {
+    const auto world_height = boid_map->m_cell_size * boid_map->m_ysize;
+    const auto world_width = boid_map->m_cell_size * boid_map->m_xsize;
 
-    for (int cy = -1; cy <= 1; cy++) {
-        //Work out the memory range we're calculating on
-        Boid row_begin = -1;
-        Boid row_end = -1;
+    //Maybe add these to task allocator    
+    Boid cell_begin = boid_map->m_boid_map[y * boid_map->m_xsize + x];
+    // If this cell is empty then just return
+    if (cell_begin == -1 ) return;
+    Boid cell_end = cell_begin + boid_list->m_boid_store->depth[cell_begin];
 
-        //Todo check if this would be faster branchless -- probably not worth the readability
-        for (int cx = -1; cx <= 1; cx++) {
-            Boid current = map.get_coord(y + cy, x + cx);
-            if (current != -1) {
-                if (row_begin == -1) row_begin = current;
-                row_end = current + boid_list.m_boid_store->depth[current];
-            }
-        }
-        
-        //Check if any cells have work for us
-        if (row_begin != -1) { 
-            //For each boid in current cell
-            for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid++) {
-                float sep_x = 0, sep_y = 0;
-
-                //Variables for tracking aligment
-                float avg_vx = 0, avg_vy = 0;
-
-                //Variables for tracking cohesion
-                float avg_x = 0, avg_y = 0;
-                
-                //Remember to mask!
-                __m256 sep_x_vec = _mm256_set1_ps(0.);
-                __m256 sep_y_vec = _mm256_set1_ps(0.);
-                __m256 avg_x_vec = _mm256_set1_ps(0.);
-                __m256 avg_y_vec = _mm256_set1_ps(0.);
-                __m256 avg_vx_vec = _mm256_set1_ps(0.);
-                __m256 avg_vy_vec = _mm256_set1_ps(0.);
-
-                uint_fast16_t in_sight_counter = 0; 
-                __m256i isc = _mm256_set1_epi32(0);
-
-                __m256i read_mask;
-                
-                /* Keeping this here as an explaination for the SIMD code below
-                //Check against each boid in the row currently being processed
-                for (Boid nearby_boid = row_end; nearby_boid < row_end; nearby_boid++) {
-
-                    int_fast32_t dist_squared = (xs[current_boid] - xs[nearby_boid]) * (xs[current_boid] - xs[nearby_boid]) + (ys[current_boid] - ys[nearby_boid]) * (ys[current_boid] - ys[nearby_boid]);
-
-                    const bool pc_srs = dist_squared < rules.sight_range_squared;
-
-                    const bool pc_ads = dist_squared < rules.avoid_distance_squared;
-
-                    const bool in_sight_but_not_avoid = !pc_ads & pc_srs;
-                    
-                    sep_x += (pc_ads) * (xs[current_boid] - xs[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
-                    sep_y += (pc_ads) * (ys[current_boid] - ys[nearby_boid]) * (rules.avoid_distance_squared - dist_squared) * (rules.avoid_distance_squared - dist_squared);
-                    
-                    avg_vx += in_sight_but_not_avoid * vxs[nearby_boid];
-                    avg_vy += in_sight_but_not_avoid * vys[nearby_boid];
-
-                    avg_x  += in_sight_but_not_avoid * xs[nearby_boid];
-                    avg_y  += in_sight_but_not_avoid * ys[nearby_boid];
-
-                    in_sight_counter += in_sight_but_not_avoid;
-                }
-                */
-
-                const auto ads_vec = _mm256_set1_ps(rules.avoid_distance_squared);
-                const auto srs_vec = _mm256_set1_ps(rules.sight_range_squared);
-
-                for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
-                    //int bytes_left = row_end - nearby_boid; 
-                    //read_mask = _mm256_set_epi32((bytes_left > 7) * 0xFFFFFFFF, (bytes_left > 6) * 0xFFFFFFFF, (bytes_left > 5) * 0xFFFFFFFF, (bytes_left > 4) * 0xFFFFFFFF, (bytes_left > 3) * 0xFFFFFFFF, (bytes_left > 2) * 0xFFFFFFFF, (bytes_left > 1) * 0xFFFFFFFF, 0xFFFFFFFF);
-
-                    //read_mask = _mm256_set1_epi32(0xFFFFFFFF);
-                    const auto nearby_xs_vec = _mm256_loadu_ps(&xs[nearby_boid]);
-                    const auto nearby_ys_vec = _mm256_loadu_ps(&ys[nearby_boid]);
-
-                    const auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
-                    const auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
-
-                    const auto current_xs_vec = _mm256_set1_ps(xs[current_boid]);
-                    const auto current_ys_vec = _mm256_set1_ps(ys[current_boid]);              
-                    
-                    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
-                    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
-                    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
-
-                    //Sight range squared
-                    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS); 
-
-                    //Avoid distance squared
-                    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);
-
-                    //In sight, but not within avoid range.
-                    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask);
-
-                    //In sight, but not within avoid range. Warning - not a bit mask!
-                    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.));
-
-                    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec);
-                    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds);
-                    
-                    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr)));
-                    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr)));
-
-                    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec);
-                    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec);
-
-                    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec);
-                    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec);
-
-                    //__m256i test = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
-                    //isc = _mm256_add_epi32(isc, (__m256i) _mm256_and_ps((__m256) read_mask, (__m256) _mm256_cvtps_epi32(sna_fpmask)));
-                    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask));
-                }
-                
-                ExtractVec<uint32_t, __m256i> extractor_i = {vector_sum(isc)};
-                in_sight_counter = extractor_i.data[0];
-                //if (!(extractor_i.data[0] == in_sight_counter)) DEBUG("%d, %d", extractor_i.data[0], in_sight_counter);
-
-                ExtractVec<float, __m256> extractor_f = {vector_sum(avg_vx_vec)};
-                //if (!(abs(avg_vx - extractor_f.data[0]) < 0.001)) DEBUG("%f %f %d", extractor_f.data[0], avg_vx, abs(avg_vx - extractor_f.data[0]) < 0.011);
-                avg_vx = extractor_f.data[0];
-                extractor_f.vector = vector_sum(avg_vy_vec);
-                avg_vy = extractor_f.data[0];
-
-                extractor_f.vector = vector_sum(avg_x_vec);
-                avg_x = extractor_f.data[0];
-                extractor_f.vector = vector_sum(avg_y_vec);
-                avg_y = extractor_f.data[0];
-
-                extractor_f.vector = vector_sum(sep_x_vec);
-                sep_x = extractor_f.data[0];
-                extractor_f.vector = vector_sum(sep_y_vec);
-                sep_y = extractor_f.data[0];
-                
-                //TraceLog(LOG_DEBUG, TextFormat("vector saw: %d --- actual %d", isc_out.data[0], in_sight_counter));
-
-                //Avoidance
-                vxs[current_boid] += sep_x * rules.avoid_factor;
-                vys[current_boid] += sep_y * rules.avoid_factor;
-
-                //When we are using SIMD we can use masks to avoid all the in sight counters
-                //Alignment
-                avg_vx = avg_vx/(in_sight_counter + (in_sight_counter == 0));
-                avg_vy = avg_vy/(in_sight_counter + (in_sight_counter == 0));
-
-                vxs[current_boid] += (in_sight_counter > 0) * (avg_vx - vxs[current_boid]) * rules.alignment_factor;
-                vys[current_boid] += (in_sight_counter > 0) * (avg_vy - vys[current_boid]) * rules.alignment_factor;
-
-                //Cohesion
-                avg_x = avg_x/(in_sight_counter + (in_sight_counter == 0));
-                avg_y = avg_y/(in_sight_counter + (in_sight_counter == 0));
-
-                vxs[current_boid] += (in_sight_counter > 0) * (avg_x - xs[current_boid]) * rules.cohesion_factor;
-                vys[current_boid] += (in_sight_counter > 0) * (avg_y - ys[current_boid]) * rules.cohesion_factor;
-            }
-        }       
-    }
-}
-
-/*
-#define CALC_AVG                       \
-        { \
-        const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);\
-        const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);\
-        const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));\
-        const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS);\         
-        const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);\           
-        const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask); \            
-        const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.)); \ 
-        const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec); \
-        const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds); \
-        sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))); \
-        sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))); \
-        avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec); \
-        avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec); \
-        avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec); \ 
-        avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); \
-        isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); \
-        }
-*/
-
-/*
-inline void calc_avg(__m256& current_xs_vec, __m256& current_ys_vec, __m256& nearby_xs_vec, __m256& nearby_ys_vec, __m256& srs_vec, __m256& ads_vec, __m256& sep_x_vec, __m256& sep_y_vec) {
-    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
-    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec);
-    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta));
-    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS);       
-    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS);        
-    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask);         
-    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.)); 
-    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec); 
-    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds); 
-    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))); 
-    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))); 
-    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec); 
-    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec); 
-    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec); 
-    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); 
-    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); 
-}
-*/
-
-#define UNROLL8(f, i) \
-	f((i)) 			f((i+1*8)) \
-	f((i+2*8))		f((i+3*8)) \
-	f((i+4*8)) 		f((i+5*8)) \
-	f((i+6*8))		f((i+7*8))
-
-/*
-#define compute(i) \
-    { \
-    const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec); \
-    const auto ys_delta = _mm256_sub_ps(current_ys_vec, nearby_ys_vec); \
-    const auto ds_vec = _mm256_add_ps(_mm256_mul_ps(xs_delta, xs_delta), _mm256_mul_ps(ys_delta, ys_delta)); \
-    const auto srs_mask = _mm256_cmp_ps(ds_vec, srs_vec, _CMP_LT_OS); \
-    const auto ads_mask = _mm256_cmp_ps(ds_vec, ads_vec, _CMP_LT_OS); \
-    const auto sna_bitmask = _mm256_andnot_ps(ads_mask, srs_mask); \
-    const auto sna_fpmask = _mm256_and_ps(sna_bitmask, _mm256_set1_ps(1.)); \
-    const auto ads_take_ds = _mm256_sub_ps(ads_vec, ds_vec); \
-    const auto ads_take_ds_sqr = _mm256_mul_ps(ads_take_ds, ads_take_ds); \
-    sep_x_vec = _mm256_add_ps(sep_x_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(xs_delta, ads_take_ds_sqr))); \
-    sep_y_vec = _mm256_add_ps(sep_y_vec, _mm256_and_ps(ads_mask, _mm256_mul_ps(ys_delta, ads_take_ds_sqr))); \
-    avg_vx_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vxs_vec, avg_vx_vec); \
-    avg_vy_vec = _mm256_fmadd_ps(sna_fpmask, nearby_vys_vec, avg_vy_vec); \
-    avg_x_vec = _mm256_fmadd_ps(sna_fpmask, nearby_xs_vec, avg_x_vec); \ 
-    avg_y_vec = _mm256_fmadd_ps(sna_fpmask, nearby_ys_vec, avg_y_vec); \
-    isc = _mm256_add_epi32(isc, _mm256_cvtps_epi32(sna_fpmask)); \
-    nearby_xs_vec   = _mm256_permutevar8x32_ps(nearby_xs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
-    nearby_ys_vec   = _mm256_permutevar8x32_ps(nearby_ys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
-    nearby_vxs_vec  = _mm256_permutevar8x32_ps(nearby_vxs_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
-    nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1)); \
-    } 
-*/
-
-inline void update_cell2(const BoidMap *map, const int x, const int y, const Rules *rules, const BoidList *boid_list) {
-    const auto world_height = map->m_cell_size * map->m_ysize;
-    const auto world_width = map->m_cell_size * map->m_xsize;
-
-    //Maybe add these to task allocator
-    const Boid cell_to_update = map->get_coord(y, x);
-    if (cell_to_update == -1 ) return;
 
     const auto xs = boid_list->m_boid_store->xs;
     const auto ys = boid_list->m_boid_store->ys;
@@ -672,9 +362,6 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
     const auto ads_vec = _mm256_set1_ps(rules->avoid_distance_squared);
     const auto srs_vec = _mm256_set1_ps(rules->sight_range_squared);
     const auto af_vec  = _mm256_set1_ps(rules->avoid_factor);
-    
-    Boid cell_begin = cell_to_update;
-    Boid cell_end = cell_begin + boid_list->m_boid_store->depth[cell_begin];
 
     for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid += 8) {
         auto current_xs_vec = _mm256_loadu_ps(&xs[current_boid]);
@@ -700,7 +387,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
             //Todo check if this would be faster branchless -- probably not worth the readability
             for (int cx = -1; cx <= 1; cx++) {
                 // This line could be slow
-                Boid current = map->get_coord(y + cy, x + cx);
+                Boid current = boid_map->get_coord(y + cy, x + cx);
                 if (current != -1) {
                     if (row_begin == -1) row_begin = current;
                     //This line is probably bad too
@@ -769,6 +456,7 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
                     nearby_vys_vec  = _mm256_permutevar8x32_ps(nearby_vys_vec, _mm256_set_epi32(0, 7, 6, 5, 4, 3, 2, 1));
                 }
                 
+
                 //UNROLL8(compute, i);        
             }
             
@@ -801,7 +489,6 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
         
         vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->cohesion_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_x_vec, current_xs_vec)), vxs_out);
         vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->cohesion_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_y_vec, current_ys_vec)), vys_out);
-
         
         //Window edges
         const auto rf = _mm256_set1_ps(rules->edge_factor);
@@ -839,7 +526,6 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
 
         ////////////////////////////////////////////
         
-        /*
         const auto homes_vec = _mm256_loadu_si256((const __m256i*) &homes[current_boid]);
 
         auto home_index_x_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_and_si256(homes_vec, _mm256_set1_epi32(15)), _mm256_set1_epi32(1)));
@@ -853,19 +539,25 @@ inline void update_cell2(const BoidMap *map, const int x, const int y, const Rul
 
         vxs_out = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), vxs_out);
         vys_out = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), vys_out);
-        */
-        /*
-        auto xs_out = _mm256_add_ps(current_xs_vec, vxs_out);
-        auto ys_out = _mm256_add_ps(current_ys_vec, vys_out);
+        
+        
+#ifndef RUNNER_STORE
+        auto temp = _mm256_add_ps(_mm256_set1_ps((float) current_boid), _mm256_set_ps(7., 6., 5., 4., 3., 2., 1., 0.));
+        auto out_mask = _mm256_cmp_ps(temp, _mm256_set1_ps(cell_end), _CMP_LT_OS);
+        // ONLY WRITE OUT VELS OF BOIDS ACTUALLY IN OUR CELL
+
+        
+        auto xs_out = _mm256_add_ps(current_xs_vec, _mm256_and_ps(vxs_out, out_mask));
+        auto ys_out = _mm256_add_ps(current_ys_vec, _mm256_and_ps(vys_out, out_mask));
 
         _mm256_storeu_ps(&xs[current_boid], xs_out);
-        _mm256_storeu_ps(&ys[current_boid], ys_out);
-        */
-
+        _mm256_storeu_ps(&ys[current_boid], ys_out);   
+#endif
         ///////////////////////////////////////////
+
         _mm256_storeu_ps(&vxs[current_boid], vxs_out);
         _mm256_storeu_ps(&vys[current_boid], vys_out);
-    } 
+    }
 }
 
 
@@ -1013,10 +705,12 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
 
 inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules, const BoidList* boid_list) {
     ZoneScoped;
+    
     const auto xs = boid_list->m_boid_store->xs;
     const auto ys = boid_list->m_boid_store->ys;
     const auto vxs = boid_list->m_boid_store->vxs;
     const auto vys = boid_list->m_boid_store->vys;
+    /*
     const auto homes = boid_list->m_boid_store->homes;
 
     const auto world_height = boid_map->m_cell_size * boid_map->m_ysize;
@@ -1030,7 +724,8 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
 
     const auto x_const = _mm256_set1_ps((float) ((world_width - rules->edge_width * 2) / (16 + 1)));
     const auto y_const = _mm256_set1_ps((float) ((world_height - rules->edge_width * 2) / (9 + 1)));
-
+    */
+   
     //This is simple enough that it is being auto vectorized by the compiler (can see in the asm)
     //After moving to cl from g++ this doesn't seem to be true anymore
     
@@ -1057,7 +752,7 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
     }
     */
     
-    
+    /*
     for (Boid boid = 0; boid < boid_list->m_size; boid += 8) {
         const auto homes_vec = _mm256_load_si256((const __m256i*) &homes[boid]);
 
@@ -1085,33 +780,64 @@ inline void update_non_interacting2(const BoidMap* boid_map, const Rules* rules,
         _mm256_store_ps(&xs[boid], xs_out);
         _mm256_store_ps(&ys[boid], ys_out);
     }
-    
+    */
     /*
     for (Boid boid = 0; boid < boid_list->m_size; boid++) {     
         xs[boid] += vxs[boid];
         ys[boid] += vys[boid];        
     }
     */
-    /*
+    
     for (Boid boid = 0; boid < boid_list->m_size; boid += 8) {
-        _mm256_store_ps(&xs[boid] ,_mm256_add_ps(_mm256_loadu_ps(&vxs[boid]), _mm256_loadu_ps(&xs[boid])));
-        _mm256_store_ps(&ys[boid] ,_mm256_add_ps(_mm256_loadu_ps(&vys[boid]), _mm256_loadu_ps(&ys[boid])));
+        _mm256_store_ps(&xs[boid], _mm256_add_ps(_mm256_load_ps(&vxs[boid]), _mm256_load_ps(&xs[boid])));
+        _mm256_store_ps(&ys[boid], _mm256_add_ps(_mm256_load_ps(&vys[boid]), _mm256_load_ps(&ys[boid])));
     }
-    */
 }
 
 inline void row_runner(const int y, const Rules *rules) {
     ZoneScoped;
+
+#ifndef RUNNER_STORE
     for (int x = 0; x < boid_map->m_xsize; x++) {
-        update_cell2(boid_map, x, y, rules, boid_list);
+        update_cell2(x, y, rules, boid_list);
     }
+#endif
+
+#ifdef RUNNER_STORE
+    Boid first_cell_begin = -1;
+    Boid last_cell_begin = -1;
+
+    for (int x = 0; x < boid_map->m_xsize; x++) {
+        Boid cell_begin = boid_map->m_boid_map[y * boid_map->m_xsize + x];
+
+        if (first_cell_begin == -1) first_cell_begin = cell_begin;
+        if (cell_begin != -1) last_cell_begin = cell_begin;
+        update_cell2(x, y, rules, boid_list);
+    }
+
+    if (first_cell_begin == -1) return;
+    Boid last_cell_end = last_cell_begin + boid_list->m_boid_store->depth[last_cell_begin];
+    
+    Boid boid;
+    for (boid = first_cell_begin; boid < (last_cell_end - 8); boid += 8) {
+        _mm256_store_ps(&boid_list->m_boid_store->xs[boid], _mm256_add_ps(_mm256_load_ps(&boid_list->m_boid_store->vxs[boid]), _mm256_load_ps(&boid_list->m_boid_store->xs[boid])));
+        _mm256_store_ps(&boid_list->m_boid_store->ys[boid], _mm256_add_ps(_mm256_load_ps(&boid_list->m_boid_store->vys[boid]), _mm256_load_ps(&boid_list->m_boid_store->ys[boid])));
+    }
+
+    auto temp = _mm256_add_ps(_mm256_set1_ps((float) boid), _mm256_set_ps(7., 6., 5., 4., 3., 2., 1., 0.));
+    auto out_mask = _mm256_cmp_ps(temp, _mm256_set1_ps(last_cell_end), _CMP_LT_OS);
+
+    _mm256_store_ps(&boid_list->m_boid_store->xs[boid], _mm256_add_ps(_mm256_and_ps(_mm256_load_ps(&boid_list->m_boid_store->vxs[boid]), out_mask), _mm256_load_ps(&boid_list->m_boid_store->xs[boid])));
+    _mm256_store_ps(&boid_list->m_boid_store->ys[boid], _mm256_add_ps(_mm256_and_ps(_mm256_load_ps(&boid_list->m_boid_store->vys[boid]), out_mask), _mm256_load_ps(&boid_list->m_boid_store->ys[boid])));
+
+#endif    
 }
 
 void full_runner(const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int y = 0; y < boid_map->m_ysize; y += 2) {
         for (int x = 0; x < boid_map->m_xsize; x++) {
             //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
-            update_cell2(boid_map, x, y, rules, boid_list);
+            update_cell2(x, y, rules, boid_list);
             
         }
     }
@@ -1119,7 +845,7 @@ void full_runner(const BoidMap *boid_map, const Rules *rules, const BoidList *bo
     for (int y = 1; y < boid_map->m_ysize; y+=2) {
         for (int x = 0; x < boid_map->m_xsize; x++) {
             //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
-            update_cell2(boid_map, x, y, rules, boid_list);
+            update_cell2(x, y, rules, boid_list);
         }
     }
 }
@@ -1128,7 +854,7 @@ void full_runner(const BoidMap *boid_map, const Rules *rules, const BoidList *bo
 void block_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int y = thread_num * (boid_map->m_ysize / NUM_THREADS) + offset; y < (thread_num + 1) * (boid_map->m_ysize / NUM_THREADS); y += 2) {
         for (int x = 0; x < boid_map->m_xsize; x++) {
-            update_cell2(boid_map, x, y, rules, boid_list);
+            update_cell2(x, y, rules, boid_list);
         }
     }
 }
@@ -1136,7 +862,7 @@ void block_runner(int thread_num, bool offset, const BoidMap *boid_map, const Ru
 //Allocates rows in blocks to each thread
 void block_runner_unstable(int y, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
     for (int x = 0; x < boid_map->m_xsize; x++) {
-        update_cell2(boid_map, x, y, rules, boid_list);
+        update_cell2(x, y, rules, boid_list);
     }
 }
 
@@ -1154,105 +880,8 @@ inline void async_runner(int y, std::future<void> *pool, const BoidMap *boid_map
     }
 
     for (int x = 0; x < boid_map->m_xsize; x++) {
-        update_cell2(boid_map, x, y, rules, boid_list);
+        update_cell2(x, y, rules, boid_list);
     }
-}
-
-void update_boids(const BoidMap& boid_map, const Rules& rules, const BoidList& boid_list) {
-    auto t_start = TIME_NOW;
-
-    #ifndef USE_MULTICORE
-
-    for (int y = 0; y < boid_map.m_ysize; y += 2) {
-        for (int x = 0; x < boid_map.m_xsize; x++) {
-            //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
-            update_cell2(&boid_map, x, y, &rules, &boid_list);
-            
-        }
-    }
-
-    for (int y = 1; y < boid_map.m_ysize; y+=2) {
-        for (int x = 0; x < boid_map.m_xsize; x++) {
-            //update_cell(boid_map, x, y, rules, selected_boid, boid_list);
-            update_cell2(&boid_map, x, y, &rules, &boid_list);
-        }
-    }
-
-    #endif
-
-    #ifdef USE_MULTICORE
-
-
-    //Async is currently slower than my threading implementation
-
-    #define USE_ASYNC
-
-    #ifndef USE_ASYNC
-    std::thread threads[NUM_THREADS];
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        //block_runner(i, false, &boid_map, &rules, &boid_list);
-        threads[i] = std::thread(jump_runner, i, false, &boid_map, &rules, &boid_list);
-    }
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threads[i].join();
-    }
-
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        //block_runner(i, true, &boid_map, &rules, &boid_list);
-        threads[i] = std::thread(jump_runner, i, true, &boid_map, &rules, &boid_list);
-    }
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threads[i].join();
-    }
-    #endif
-
-    /*
-    for (int i = 0; i < NUM_THREADS; i++) {
-        //block_runner(i, true, &boid_map, &rules, &boid_list);
-        threads[i] = std::thread(block_runner_unstable, i, &boid_map, &rules, &boid_list);
-    }
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threads[i].join();
-    }
-    */
-
-    #ifdef USE_ASYNC
-    
-    std::vector<std::future<void>> pool;
-    pool.resize(NUM_THREADS);
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        pool[i] = std::async(std::launch::async, jump_runner, i, false, &boid_map, &rules, &boid_list);
-    }
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        pool[i].wait();
-    }
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        pool[i] = std::async(std::launch::async, jump_runner, i, true, &boid_map, &rules, &boid_list);
-    }
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        pool[i].wait();
-    }
-    
-    #endif
-
-    #endif
-    
-    auto t_mid = TIME_NOW;
-
-    update_non_interacting2(&boid_map, &rules, &boid_list);
-
-    auto t_end = TIME_NOW;
-
-    DEBUG("cells :%0.12f, non-inter: %0.12f", std::chrono::duration<double, std::milli>(t_mid-t_start).count(), std::chrono::duration<double, std::milli>(t_end-t_mid).count());
 }
 
 void runner(TaskMaster *task_master, uint8_t thread_id) {
@@ -1261,7 +890,7 @@ void runner(TaskMaster *task_master, uint8_t thread_id) {
         Task current_task = task_master->get_task();
 
         switch (current_task.task_type) {
-            case TaskType::ROW_RUNNER_PASS_ONE: {
+            case TaskType::ROW_RUNNER: {
                     auto s = ((row_runner_args *) current_task.argument_struct);
                     row_runner(s->y, s->rules);
                 }
@@ -1280,7 +909,6 @@ void runner(TaskMaster *task_master, uint8_t thread_id) {
                 break;
                 
             case TaskType::STOP:
-                task_master->status[thread_id] = false;
                 return;
         }
 
@@ -1308,24 +936,24 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
     for (int y = 0; y < boid_map->m_ysize; y += 2) {
         task_master->ts_task_buffer.push_back(
             Task {
-                .task_type = TaskType::ROW_RUNNER_PASS_ONE,
+                .task_type = TaskType::ROW_RUNNER,
                 .argument_struct = &arg_list[y],
                 .sync = task_monitor,
                 .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task)
                 {
-                    auto old_args = ((row_runner_args *)current_task->argument_struct);
+                    auto old_args = ((row_runner_args *) current_task->argument_struct);
                     uint32_t tasks_added = 0;
                     task_master->lock.lock();
 
                     for (int y = 1; y < boid_map->m_ysize; y += 2) {
                         task_master->ts_task_buffer.push_back(
                             Task {
-                                .task_type = TaskType::ROW_RUNNER_PASS_ONE,
+                                .task_type = TaskType::ROW_RUNNER,
                                 .argument_struct = &old_args->arg_store[y],
                                 .sync = current_task->sync,
                                 .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
-                                    auto old_args = ((row_runner_args *)current_task->argument_struct);
-                                    update_non_interacting2(boid_map, old_args->rules, boid_list);
+                                    auto old_args = ((row_runner_args *) current_task->argument_struct);
+                                    //update_non_interacting2(boid_map, old_args->rules, boid_list);
                                     populate_map2(task_master, current_task->sync, old_args->pop_args, old_args->pop_args->num_tasks);
 
                                     FrameMarkEnd("Update Boids");
@@ -1374,8 +1002,8 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
                 .argument_struct = &arg_list[y],
                 .sync = task_monitor,
                 .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
-                        auto old_args = ((rebuild_args *) current_task->argument_struct);
-
+                        ZoneScoped;
+                        //auto old_args = ((rebuild_args *) current_task->argument_struct);
                         //Flip buffers
                         auto temp_boid_store = boid_list->m_boid_store;
                         boid_list->m_boid_store = boid_list->m_backbuffer;
@@ -1393,7 +1021,57 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
 
     //Go!
     task_master->lock.unlock();
-}   
+}
+
+Matrix MatrixLookDown(Vector3 eye)
+{
+    Matrix result = { 0 };
+     
+    result.m0 = 1.0f;
+    result.m1 = 0.0f;
+    result.m2 = 0.0f;
+    result.m3 = 0.0f;
+    result.m4 = 0.0f;
+    result.m5 = 0.0f;
+    result.m6 = 1.0f;
+    result.m7 = 0.0f;
+    result.m8 = 0.0f;
+    result.m9 = -1.0f;
+    result.m10 = 0.0f;
+    result.m11 = 0.0f;
+    result.m12 = -(eye.x);   
+    result.m13 = (eye.z); 
+    result.m14 = -(eye.y);
+    result.m15 = 1.0f;
+
+    return result;
+}
+
+void fBeginMode3D(Camera camera) {
+    //rlDrawRenderBatchActive();      // Update and draw internal render batch
+
+    rlMatrixMode(RL_PROJECTION);    // Switch to projection matrix
+    rlPushMatrix();                 // Save previous matrix, which contains the settings for the 2d ortho projection
+    rlLoadIdentity();               // Reset current matrix (projection)
+
+    float aspect = (float) GetScreenWidth() / (float) GetScreenHeight();
+
+    
+    // Setup orthographic projection
+    double top = camera.fovy/2.0;
+    double right = top*aspect;
+
+    rlOrtho(-right, right, -top,top, RL_CULL_DISTANCE_NEAR, RL_CULL_DISTANCE_FAR);
+    
+
+    rlMatrixMode(RL_MODELVIEW);     // Switch back to modelview matrix
+    rlLoadIdentity();               // Reset current matrix (modelview)
+
+    // Setup Camera view
+    Matrix matView = MatrixLookDown(camera.position);
+    rlMultMatrixf(MatrixToFloat(matView));      // Multiply modelview matrix by view matrix (camera)
+    //glMultMatrixf(MatrixToFloat(matView));
+}
 
 void render(Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
     ZoneScoped;
@@ -1404,7 +1082,9 @@ void render(Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Mate
         //We could cull here by offsetting the start pointers by some amount
         auto const boid_store = boid_list->m_backbuffer;
         int offset = 0;
-        BeginMode3D(camera);
+
+        fBeginMode3D(camera);
+            //rlEnableShader(matInstances->shader.id);
             DrawMeshInstanced2(*tri, *matInstances, boid_list->m_size - offset, boid_store->xs + offset, boid_store->ys + offset, boid_store->vxs + offset, boid_store->vys + offset);
         EndMode3D();
 
@@ -1443,8 +1123,8 @@ void render(Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Mate
 }
 
 int main(int argc, char* argv[]) {
-    uint32_t num_boids = atoi(argv[1]);
-    //uint32_t num_boids = 2000000;
+    //uint32_t num_boids = atoi(argv[1]);
+    uint32_t num_boids = 2000000;
 
     SetTraceLogLevel(LOG_ALL);
 
@@ -1463,12 +1143,10 @@ int main(int argc, char* argv[]) {
 
     TraceLog(LOG_DEBUG, TextFormat("Boid size is: %d bytes", sizeof(Boid)));
 
-    //SetConfigFlags(FLAG_MSAA_4X_HINT);
-
     Mesh tri = GenMeshCustom();
 
-    Shader boid_shader = LoadShader(TextFormat("resources/shaders/glsl%i/directional.vs", 330),
-                                    TextFormat("resources/shaders/glsl%i/simple.fs", 330));
+    Shader boid_shader = LoadShader(TextFormat(RESOURCES_PATH "shaders/glsl%i/directional.vs", 330),
+                                    TextFormat(RESOURCES_PATH "/shaders/glsl%i/simple.fs", 330));
 
     boid_shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(boid_shader, "viewPos");
     boid_shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(boid_shader, "instanceTransform");
@@ -1508,12 +1186,15 @@ int main(int argc, char* argv[]) {
 
     PerfMonitor perf_monitor;    
 
-    myfile.open("log.log");
+    //myfile.open("log.log");
 
-    const uint32_t world_size_mult = std::ceil(sqrt( (BOID_DENSITY_MAGIC_NUMBER / ((double)screen_height)) * ((double) num_boids / (double) screen_width)));
+    //const uint32_t world_size_mult = std::ceil(sqrt((BOID_DENSITY_MAGIC_NUMBER / ((double) std::min(screen_height, 1440))) * ((double) num_boids / (double) std::min(screen_width, 2560))));
+    const uint32_t world_size_mult = std::ceil(sqrt((BOID_DENSITY_MAGIC_NUMBER / ((double) screen_height)) * ((double)num_boids / (double) screen_width )));
 
     const int world_width = screen_width * world_size_mult;
     const int world_height = screen_height * world_size_mult;
+
+    DEBUG("ww: %d", world_width);
 
     Camera2D cam = { 0 };
     cam.zoom = static_cast<float>(screen_width) / world_width;
@@ -1625,17 +1306,10 @@ int main(int argc, char* argv[]) {
     update_boids2(args_update, &task_master, &task_update);
     task_update.wait();
     
+    rlEnableShader(matInstances.shader.id);
 
     DEBUG("Starting main loop");
     while (WindowShouldClose() == false){
-
-        /*
-        TaskSync task_rebuild;
-        FrameMarkStart("Rebuild List");
-        rebuild_list2(&boid_map, &boid_list, args_rebuild, &task_master, &task_rebuild);
-        task_rebuild.wait();
-        FrameMarkEnd("Rebuild List");
-        */
         auto t_update_start = TIME_NOW;
 
         FrameMarkStart("Update Boids");
@@ -1680,7 +1354,9 @@ int main(int argc, char* argv[]) {
         float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
         SetShaderValue(boid_shader, boid_shader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
 
+        FrameMarkStart("wait_rebuild");
         task_rebuild.wait();   
+        FrameMarkEnd("wait_rebuild");
 
         update_boids2(args_update, &task_master, &task_update);
 
@@ -1723,6 +1399,36 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
+/*
+#define GLAD_MALLOC RL_MALLOC
+#define GLAD_FREE RL_FREE
+
+#define GLAD_GL_IMPLEMENTATION
+#include "glad.h"          // GLAD extensions loading library, includes OpenGL headers
+*/
+
+
+unsigned int flLoadVertexBuffer(const void *buffer, int size, unsigned int prev)
+{
+    if (!prev) {
+        unsigned int id = 0;
+
+        glGenBuffers(1, &id);
+        glBindBuffer(GL_ARRAY_BUFFER, id);
+        glBufferData(GL_ARRAY_BUFFER, size, buffer, GL_STREAM_DRAW);
+
+        return id;
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, prev);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, size, buffer);
+
+        return prev;
+    }
+}
+
+
+// Instancing required variables
+unsigned int instances_boid_x_ID = 0, instances_boid_y_ID = 0, instances_boid_vx_ID = 0, instances_boid_vy_ID = 0;
 
 // Modified version of DrawMeshInstanced from the raylib module "rmodels.c"
 // My modifications bind the x, y, vx, and vy of each boids as vertex attributes
@@ -1733,11 +1439,12 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     #define MAX_MATERIAL_MAPS 12
     #define MAX_MESH_VERTEX_BUFFERS 7
 
-    // Instancing required variables
-    unsigned int instances_boid_x_ID, instances_boid_y_ID, instances_boid_vx_ID, instances_boid_vy_ID;
 
     // Bind shader program
     rlEnableShader(material.shader.id);
+    
+    unsigned int id = 0;
+    glGenBuffers(1, &id);
 
     // Send required data to shader (matrices, values)
     //-----------------------------------------------------
@@ -1759,54 +1466,52 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
     // NOTE: At this point the modelview matrix just contains the view matrix (camera)
     // That's because BeginMode3D() sets it and there is no model-drawing function
     // that modifies it, all use rlPushMatrix() and rlPopMatrix()
-    Matrix matView = rlGetMatrixModelview();
-    Matrix matModelView = MatrixIdentity();
-    Matrix matProjection = rlGetMatrixProjection();
+    //Matrix matView = rlGetMatrixModelview();
+    //Matrix matModelView = MatrixIdentity();
+    //Matrix matProjection = rlGetMatrixProjection();
 
     // Upload view and projection matrices (if locations available)
-    if (material.shader.locs[SHADER_LOC_MATRIX_VIEW] != -1) rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_VIEW], matView);
-    if (material.shader.locs[SHADER_LOC_MATRIX_PROJECTION] != -1) rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
+    //if (material.shader.locs[SHADER_LOC_MATRIX_VIEW] != -1) rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_VIEW], matView);
+    //if (material.shader.locs[SHADER_LOC_MATRIX_PROJECTION] != -1) rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_PROJECTION], matProjection);
 
     // Enable mesh VAO to attach new buffer
     rlEnableVertexArray(mesh.vaoId);
 
     FrameMarkEnd("Begin Render");
     FrameMarkStart("Upload");
-    instances_boid_x_ID = rlLoadVertexBuffer(boid_x, instances*sizeof(float), false);
+    
+    instances_boid_x_ID = flLoadVertexBuffer(boid_x, instances*sizeof(float), instances_boid_x_ID);
     rlEnableVertexAttribute(material.shader.locs[26]);
     rlSetVertexAttribute(material.shader.locs[26], 1, RL_FLOAT, false, sizeof(float), 0);
     rlSetVertexAttributeDivisor(material.shader.locs[26], 1);
 
-    instances_boid_y_ID = rlLoadVertexBuffer(boid_y, instances*sizeof(float), false);
+    instances_boid_y_ID = flLoadVertexBuffer(boid_y, instances*sizeof(float), instances_boid_y_ID);
     rlEnableVertexAttribute(material.shader.locs[27]);
     rlSetVertexAttribute(material.shader.locs[27], 1, RL_FLOAT, false, sizeof(float), 0);
     rlSetVertexAttributeDivisor(material.shader.locs[27], 1);
 
-    instances_boid_vx_ID = rlLoadVertexBuffer(boid_vx, instances*sizeof(float), false);
+    instances_boid_vx_ID = flLoadVertexBuffer(boid_vx, instances*sizeof(float), instances_boid_vx_ID);
     rlEnableVertexAttribute(material.shader.locs[28]);
     rlSetVertexAttribute(material.shader.locs[28], 1, RL_FLOAT, false, sizeof(float), 0);
     rlSetVertexAttributeDivisor(material.shader.locs[28], 1);
 
-    instances_boid_vy_ID = rlLoadVertexBuffer(boid_vy, instances*sizeof(float), false);
+    instances_boid_vy_ID = flLoadVertexBuffer(boid_vy, instances*sizeof(float), instances_boid_vy_ID);
     rlEnableVertexAttribute(material.shader.locs[29]);
     rlSetVertexAttribute(material.shader.locs[29], 1, RL_FLOAT, false, sizeof(float), 0);
     rlSetVertexAttributeDivisor(material.shader.locs[29], 1);
     
-    //rlDisableVertexBuffer();
-    //rlDisableVertexArray();
-
     FrameMarkEnd("Upload");
     FrameMarkStart("End Render");
 
     // Accumulate internal matrix transform (push/pop) and view matrix
     // NOTE: In this case, model instance transformation must be computed in the shader
-    matModelView = MatrixMultiply(rlGetMatrixTransform(), matView);
+    Matrix matModelView = MatrixMultiply(rlGetMatrixTransform(), rlGetMatrixModelview());
 
     // Try binding vertex array objects (VAO)
     rlEnableVertexArray(mesh.vaoId);
        
     // Calculate model-view-projection matrix (MVP)
-    Matrix matModelViewProjection = MatrixMultiply(matModelView, matProjection);
+    Matrix matModelViewProjection = MatrixMultiply(matModelView, rlGetMatrixProjection());
     
     // Send combined model-view-projection matrix to shader
     rlSetUniformMatrix(material.shader.locs[SHADER_LOC_MATRIX_MVP], matModelViewProjection);
@@ -1832,19 +1537,5 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float *boid
         }
     }
     
-    // Disable all possible vertex array objects (or VBOs)
-    rlDisableVertexArray();
-    rlDisableVertexBuffer();
-    rlDisableVertexBufferElement();
-
-    // Disable shader program
-    rlDisableShader();
-
-    // Remove instance transforms buffer
-    rlUnloadVertexBuffer(instances_boid_x_ID);
-    rlUnloadVertexBuffer(instances_boid_y_ID);
-    rlUnloadVertexBuffer(instances_boid_vx_ID);
-    rlUnloadVertexBuffer(instances_boid_vy_ID);
-
     FrameMarkEnd("End Render");
 }

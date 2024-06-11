@@ -11,28 +11,6 @@
 
 #include <raylib.h>
 
-/*
-struct Lock {
-    CRITICAL_SECTION cs;
-
-    void lock() {
-        EnterCriticalSection(&cs);
-    }
-
-    void unlock() {
-        LeaveCriticalSection(&cs);
-    }
-
-    Lock() {
-        InitializeCriticalSection(&cs);
-    }
-
-    ~Lock() {
-        DeleteCriticalSection(&cs);
-    }
-};
-*/
-
 typedef volatile long spinlock_t;
 
 
