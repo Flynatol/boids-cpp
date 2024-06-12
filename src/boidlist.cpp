@@ -29,21 +29,21 @@ BoidList::~BoidList() {
 }
 
 BoidStore::BoidStore(std::size_t to_alloc) 
-    :   xs((float *) _aligned_malloc(to_alloc * sizeof(float), 64)),
-        ys((float *) _aligned_malloc(to_alloc * sizeof(float), 64)),
-        vxs((float *) _aligned_malloc(to_alloc * sizeof(float), 64)),
-        vys((float *) _aligned_malloc(to_alloc * sizeof(float), 64)),
-        index_next((int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64)),
-        homes((int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64)),
-        depth((int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64)) {
-}
+    :   xs          ((float *)   _aligned_malloc(to_alloc * sizeof(float), 64)),
+        ys          ((float *)   _aligned_malloc(to_alloc * sizeof(float), 64)),
+        vxs         ((float *)   _aligned_malloc(to_alloc * sizeof(float), 64)),
+        vys         ((float *)   _aligned_malloc(to_alloc * sizeof(float), 64)),
+        index_next  ((int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64)),
+        homes       ((int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64)),
+        depth       ((int32_t *) _aligned_malloc(to_alloc * sizeof(int32_t), 64)) 
+{}
 
 BoidStore::~BoidStore() {
-    _aligned_free(this->index_next);
     _aligned_free(this->xs);
     _aligned_free(this->ys);
     _aligned_free(this->vxs);
     _aligned_free(this->vys);
+    _aligned_free(this->index_next);
     _aligned_free(this->homes);
     _aligned_free(this->depth);
     

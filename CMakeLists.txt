@@ -30,10 +30,10 @@ set(USE_EXTERNAL_GLFW OFF CACHE BOOL " " FORCE) # Tell raylib to use external GL
 
 
 add_subdirectory(thirdparty/glad)				#opengl loader
-add_subdirectory(thirdparty/imgui-docking)		#ui
-add_subdirectory(thirdparty/glfw)
-add_subdirectory(thirdparty/raylib)				#raylib
-add_subdirectory(thirdparty/rlimgui)			#rlimgui
+add_subdirectory(thirdparty/imgui-docking)		
+add_subdirectory(thirdparty/glfw)				
+add_subdirectory(thirdparty/raylib)				
+add_subdirectory(thirdparty/rlimgui)			
 
 
 # MY_SOURCES is defined to be a list of all the source files for my game 
@@ -49,6 +49,7 @@ set_property(TARGET "${CMAKE_PROJECT_NAME}" PROPERTY CXX_STANDARD 20)
 target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC GLFW_INCLUDE_NONE=1) 
 
 target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE -march=native)
+#target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE /arch:AVX2)
 
 
 if(PRODUCTION_BUILD)

@@ -1,7 +1,6 @@
 #include <iostream>
 #include <raylib.h>
 
-
 #include <raymath.h>
 #include <cstdint>
 #include <array>
@@ -11,12 +10,12 @@
 #include <ctime>
 #include <random>
 #include <chrono>
-#include <immintrin.h>
 #include <fstream>
 #include <thread>
 #include <future>
 #include <algorithm>
 #include <limits>
+#include <immintrin.h>
 
 #define NO_FONT_AWESOME
 
@@ -27,8 +26,6 @@
 
 #include ".\task_master\taskmaster.h"
 #include ".\task_master\tm_shared.h"
-
-
 
 #include <glad/glad.h>
 
@@ -52,8 +49,9 @@ const uint16_t SIGHT_RANGE = 100;
 #define BOID_DENSITY_MAGIC_NUMBER 2304.0
 #define CELL_WIDTH 100
 #define USE_MULTICORE 
+#define DEBUG_ENABLED
 
-//#define DEBUG_ENABLED
+//#define RUNNER_STORE
 
 #ifdef DEBUG_ENABLED
     #define TIME_NOW std::chrono::high_resolution_clock::now()
@@ -90,7 +88,7 @@ inline void write_map_to_list(int map_cell, const Boid* index_buffer) {
 
     Boid index = index_buffer[map_cell];
     Boid current = boid_map->m_boid_map[map_cell];
-
+    
     if (current != -1) {
         boid_map->m_boid_map[map_cell] = index;
     }
@@ -118,58 +116,26 @@ inline void write_map_to_list(int map_cell, const Boid* index_buffer) {
 
 void write_row_to_list(const uint32_t row, const Boid* index_buffer) {
     ZoneScoped;
-    for (int x = 0; x < boid_map->m_xsize; x+=2) {
+    /* This will fail on odd row lengths
+    for (int x = 0; x < boid_map->m_xsize; x += 2) {
         write_map_to_list(boid_map->m_xsize * row + x, index_buffer);
-        write_map_to_list(boid_map->m_xsize * row + x + 1, index_buffer); 
+        write_map_to_list(boid_map->m_xsize * row + x + 1, index_buffer);
+    }
+    */
+    for (int x = 0; x < boid_map->m_xsize; x += 1) {
+        write_map_to_list(boid_map->m_xsize * row + x, index_buffer);
     }
 }
-/*
-void duffs_write_row_to_list(const uint32_t row, const Boid* index_buffer) {
-    ZoneScoped;
-    for (int x = 0; x < boid_map->m_xsize; x+=8) {
-        //switch ()
-        write_map_to_list(boid_map->m_xsize * row + x + 7, index_buffer); 
-        write_map_to_list(boid_map->m_xsize * row + x + 6, index_buffer); 
-        write_map_to_list(boid_map->m_xsize * row + x + 5, index_buffer);
-        write_map_to_list(boid_map->m_xsize * row + x + 4, index_buffer); 
-        write_map_to_list(boid_map->m_xsize * row + x + 3, index_buffer); 
-        write_map_to_list(boid_map->m_xsize * row + x + 2, index_buffer); 
-        write_map_to_list(boid_map->m_xsize * row + x + 1, index_buffer); 
-        write_map_to_list(boid_map->m_xsize * row + x + 0, index_buffer);
-    }
 
-    int count = boid_map->m_xsize;
-    {
-        int n = (count + 7) / 8;
-        switch (count % 8) {
-        case 0: do { *to = *from++;
-        case 7:      *to = *from++;
-        case 6:      *to = *from++;
-        case 5:      *to = *from++;
-        case 4:      *to = *from++;
-        case 3:      *to = *from++;
-        case 2:      *to = *from++;
-        case 1:      *to = *from++;
-                } while (--n > 0);
-        }
-    }
-}
-*/
 inline void place_boid(Boid boid_to_place) {
     Boid map_pos = boid_map->get_map_pos_nearest(boid_list->m_boid_store->xs[boid_to_place], boid_list->m_boid_store->ys[boid_to_place]);
-    //DEBUG("placing %d", boid_to_place);
-    //DEBUG("trying to lock %d", map_pos);
 
     boid_map->safety[map_pos].lock();
-
         Boid old_head = boid_map->m_boid_map[map_pos];
         boid_map->m_boid_map[map_pos] = boid_to_place;
         boid_list->m_boid_store->index_next[boid_to_place] = old_head;
         boid_list->m_boid_store->depth[boid_to_place] = (old_head != -1) ? boid_list->m_boid_store->depth[old_head] + 1 : 1;
-        
     boid_map->safety[map_pos].unlock();
-    //DEBUG("placed %d", boid_to_place);
-
 }
 
 void block_populate(int thread_start_pos) {
@@ -218,9 +184,10 @@ void populate_map() {
 
     //Alternatively as no boid can move more than one grid square in a tick we could work in different rows spaced out by a couple rows
     //Alternatively alternatively we can just space out a lot and hope. (this probably isn't as terrible as it sounds) 
+    //Finally we could add a safetynet of locks
+    
 
-    //std::thread threads[NUM_THREADS];
-    auto safety = new Lock[boid_map->m_xsize * boid_map->m_ysize] ;
+    //auto safety = new Lock[boid_map->m_xsize * boid_map->m_ysize] ;
 
     std::vector<std::future<void>> pool;
     pool.resize(NUM_THREADS);
@@ -546,7 +513,6 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
         auto out_mask = _mm256_cmp_ps(temp, _mm256_set1_ps(cell_end), _CMP_LT_OS);
         // ONLY WRITE OUT VELS OF BOIDS ACTUALLY IN OUR CELL
 
-        
         auto xs_out = _mm256_add_ps(current_xs_vec, _mm256_and_ps(vxs_out, out_mask));
         auto ys_out = _mm256_add_ps(current_ys_vec, _mm256_and_ps(vys_out, out_mask));
 
@@ -579,18 +545,6 @@ inline void update_non_interacting(const BoidMap& boid_map, const Rules& rules, 
 
     const auto world_height = boid_map.m_cell_size * boid_map.m_ysize;
     const auto world_width = boid_map.m_cell_size * boid_map.m_xsize;
-
-    /*
-    //Moving rand to it's own loop to avoid having to vectorize rand for now. (Might disable rand)
-    for (Boid boid = 0; boid < boid_list.m_size; boid++) { 
-        //Apply some randomness
-        float rx = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
-        float ry = static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/2)) - 1;
-
-        vxs[boid] += rx * rules.rand;
-        vys[boid] += ry * rules.rand;
-    } 
-    */
 
     //Easy to SIMD but currently only using a few ms -- there are better targets for optimization
     for (Boid boid = 0; boid < boid_list.m_size; boid++) {       
@@ -850,39 +804,6 @@ void full_runner(const BoidMap *boid_map, const Rules *rules, const BoidList *bo
     }
 }
 
-//Allocates rows in blocks to each thread
-void block_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
-    for (int y = thread_num * (boid_map->m_ysize / NUM_THREADS) + offset; y < (thread_num + 1) * (boid_map->m_ysize / NUM_THREADS); y += 2) {
-        for (int x = 0; x < boid_map->m_xsize; x++) {
-            update_cell2(x, y, rules, boid_list);
-        }
-    }
-}
-
-//Allocates rows in blocks to each thread
-void block_runner_unstable(int y, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
-    for (int x = 0; x < boid_map->m_xsize; x++) {
-        update_cell2(x, y, rules, boid_list);
-    }
-}
-
-//Stripes allocations to each thread (hopefully more cache local)
-inline void jump_runner(int thread_num, bool offset, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
-    for (int y = thread_num * 2 + offset; y < boid_map->m_ysize; y += 2 * NUM_THREADS) {
-        row_runner(y, rules);
-    }
-}
-
-inline void async_runner(int y, std::future<void> *pool, const BoidMap *boid_map, const Rules *rules, const BoidList *boid_list) {
-    if (y % 2 != 0) {
-        pool[y-1].wait();
-        pool[y+1].wait();
-    }
-
-    for (int x = 0; x < boid_map->m_xsize; x++) {
-        update_cell2(x, y, rules, boid_list);
-    }
-}
 
 void runner(TaskMaster *task_master, uint8_t thread_id) {
     while(1) {
@@ -1070,7 +991,6 @@ void fBeginMode3D(Camera camera) {
     // Setup Camera view
     Matrix matView = MatrixLookDown(camera.position);
     rlMultMatrixf(MatrixToFloat(matView));      // Multiply modelview matrix by view matrix (camera)
-    //glMultMatrixf(MatrixToFloat(matView));
 }
 
 void render(Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Material *matInstances) {
@@ -1084,47 +1004,20 @@ void render(Ui *ui, Rules &rules, Camera2D cam, Camera3D camera, Mesh *tri, Mate
         int offset = 0;
 
         fBeginMode3D(camera);
-            //rlEnableShader(matInstances->shader.id);
             DrawMeshInstanced2(*tri, *matInstances, boid_list->m_size - offset, boid_store->xs + offset, boid_store->ys + offset, boid_store->vxs + offset, boid_store->vys + offset);
         EndMode3D();
 
         auto t_end_3d = TIME_NOW;
 
-        //DEBUG("3d: %0.6f", std::chrono::duration<double, std::milli>(t_end_3d-t_start_3d).count());
-        #ifdef CAMERA_2d
-        BeginMode2D(cam);
-            /*
-            Boid current = boid_map.get_head_from_screen_space(GetScreenToWorld2D(GetMousePosition(), cam));
-            while (current != -1) {
-                rlPushMatrix();
-                    rlTranslatef(xs[current], ys[current], 0);
-                    float angle = (atan2(vxs[current], vys[current]) * 360.) / (2 * PI);
-                    rlRotatef(angle, 0, 0, -1);
-                    DrawTriangle(triangle[2], triangle[1], triangle[0], BLUE);
-                rlPopMatrix();
-
-                current = index_nexts[current];
-            }        
-            */
-            if (rules.show_lines) {
-                //Draw grid
-                for (int y = 0; y < boid_map->m_ysize; y++) {
-                    DrawLine(0, y*boid_map->m_cell_size, boid_map->m_xsize*boid_map->m_cell_size, y*boid_map->m_cell_size, GRAY);
-                }
-                for (int x = 0; x < boid_map->m_xsize; x++) {
-                    DrawLine(x*boid_map->m_cell_size, 0, x*boid_map->m_cell_size, boid_map->m_ysize * boid_map->m_cell_size, GRAY);
-                }
-            }
-        EndMode2D();
-        #endif
         ui->Render(cam, camera, rules);
 
     EndDrawing();
 }
 
 int main(int argc, char* argv[]) {
-    //uint32_t num_boids = atoi(argv[1]);
-    uint32_t num_boids = 2000000;
+    
+    uint32_t num_boids = (argc > 1) ? atoi(argv[1]) : (2000000);
+
 
     SetTraceLogLevel(LOG_ALL);
 
@@ -1139,6 +1032,7 @@ int main(int argc, char* argv[]) {
     const int screen_width = GetScreenWidth();
     const int screen_height = GetScreenHeight();
 
+    DEBUG("Using %d args", argc);
     DEBUG("Using %d threads", num_threads);
 
     TraceLog(LOG_DEBUG, TextFormat("Boid size is: %d bytes", sizeof(Boid)));
@@ -1220,7 +1114,6 @@ int main(int argc, char* argv[]) {
     const float home_width = ((world_width - rules.edge_width * 2) / (16 + 1));
     const float home_height = ((world_height - rules.edge_width * 2) / (9 + 1));
 
-    //TODO just clean this up
     std::uniform_real_distribution<float> width_distribution2 (-home_width / 2.f, home_width / 2.f);
     std::uniform_real_distribution<float> height_distribution2 (-home_height / 2.f, home_height / 2.f);
 
@@ -1237,18 +1130,6 @@ int main(int argc, char* argv[]) {
         boid_list->m_boid_store->xs[i] = (home_index_x + 1) * home_width  + rules.edge_width + width_distribution2(generator);
         boid_list->m_boid_store->ys[i] = (home_index_y + 1) * home_height + rules.edge_width + height_distribution2(generator);
     }
-
-
-    populate_map();
-
-    /*
-    auto xs = boid_list.m_boid_store->xs;
-    auto ys = boid_list.m_boid_store->ys;
-    auto vxs = boid_list.m_boid_store->vxs;
-    auto vys = boid_list.m_boid_store->vys;
-    auto homes = boid_list.m_boid_store->homes;
-    auto index_nexts = boid_list.m_boid_store->index_next;
-    */
 
     //This number was found through experimentation, might not be optimal for all number of boids (10000)
     const uint32_t task_size = 10000;
@@ -1285,8 +1166,6 @@ int main(int argc, char* argv[]) {
         };
     }
     args_populate[0].num_tasks = num_tasks;
-
-    bool rebuild = true;
     
     TaskMaster task_master;
     task_master.start_threads();
@@ -1399,18 +1278,9 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-/*
-#define GLAD_MALLOC RL_MALLOC
-#define GLAD_FREE RL_FREE
-
-#define GLAD_GL_IMPLEMENTATION
-#include "glad.h"          // GLAD extensions loading library, includes OpenGL headers
-*/
-
-
-unsigned int flLoadVertexBuffer(const void *buffer, int size, unsigned int prev)
+unsigned int flLoadVertexBuffer(const void *buffer, int size, unsigned int prev_id)
 {
-    if (!prev) {
+    if (!prev_id) {
         unsigned int id = 0;
 
         glGenBuffers(1, &id);
@@ -1419,10 +1289,10 @@ unsigned int flLoadVertexBuffer(const void *buffer, int size, unsigned int prev)
 
         return id;
     } else {
-        glBindBuffer(GL_ARRAY_BUFFER, prev);
+        glBindBuffer(GL_ARRAY_BUFFER, prev_id);
         glBufferSubData(GL_ARRAY_BUFFER, 0, size, buffer);
 
-        return prev;
+        return prev_id;
     }
 }
 
