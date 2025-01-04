@@ -12,10 +12,6 @@ enum TaskType {
     STOP,
 };
 
-struct function3_args {
-    const char *text;
-};
-
 struct rebuild_args {
     uint32_t y;
     Boid *index_buffer;
