@@ -10,10 +10,9 @@
 
 struct TaskMaster;
 
-#define NUM_THREADS num_threads
-
 // Num threads doesn't include the main thread -- so we're spawning the hardware thread number -1 for main and -1 for OS stuff.
-const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 2, (uint32_t) 64);
+//const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 2, (uint32_t) 64);
+const uint32_t num_threads = 1;
 
 BOOLEAN nanosleep(LONGLONG ns);
 
@@ -25,10 +24,8 @@ struct TaskSync {
     void wait() {
         while (1) {
             tc_lock.lock();
-            //TraceLog(LOG_DEBUG, TextFormat("TC: %d", task_counter));
             if (task_counter == 0) break;
             tc_lock.unlock();
-            //std::this_thread::yield();
         }
         tc_lock.unlock();
     };
@@ -48,10 +45,8 @@ void runner(TaskMaster *task_master, uint8_t thread_id);
 struct TaskMaster {
     uint32_t front = 0;
     uint32_t back = 0;
-
-    //uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
     
-    // To be used by dynamic performance scaler
+    // Enable thread sleeping (tiny performance decrease but means performance usage scales down when there are few boids)
     bool sleep_enabled = true;
 
     RingBuffer<Task, 4096> ts_task_buffer;
@@ -65,19 +60,16 @@ struct TaskMaster {
         //This should hang until a task is available
         try_lock:
 
-        //while (!ts_task_buffer.unsafe_not_empty()) {}
-
         //Aquire front lock
         this->lock.lock();
             if (!(this->ts_task_buffer.pop_front(task))) {
                 this->lock.unlock();
-                //std::this_thread::yield();
                 if (sleep_enabled) nanosleep(10000);
                 goto try_lock;
             }
         this->lock.unlock();
 
-        //Return the actual task, because after this point the allocation in the array may be deleted (and they're very small memory wise)
+        //Return the actual task, because after this point the allocation in the array may be deleted (and they're only 32 bytes)
         return task;
     };
 

@@ -36,8 +36,6 @@
 
 #pragma comment(lib, "Winmm.lib")
 
-std::ofstream myfile;
-
 const float TRIANGLE_SIZE = 5.f;
 const uint16_t SIGHT_RANGE = 100;
 
@@ -132,10 +130,10 @@ void block_populate(int thread_start_pos) {
     //TODO work out a better fix for this
     //We need to work out a better way to allocate work between threads
 
-    auto t = thread_start_pos == ((NUM_THREADS - 1) * (boid_list->m_size / NUM_THREADS));
-    auto correction = boid_list->m_size - (thread_start_pos + (boid_list->m_size / NUM_THREADS));
+    auto t = thread_start_pos == ((num_threads - 1) * (boid_list->m_size / num_threads));
+    auto correction = boid_list->m_size - (thread_start_pos + (boid_list->m_size / num_threads));
 
-    for (int i = 0; i < (boid_list->m_size) / NUM_THREADS + correction * t; i++) {
+    for (int i = 0; i < (boid_list->m_size) / num_threads + correction * t; i++) {
         place_boid(thread_start_pos + i);
     }
 }
@@ -747,8 +745,8 @@ int main(int argc, char* argv[]) {
 
     SetTraceLogLevel(LOG_ALL);
 
-    if (num_boids < NUM_THREADS) {
-        TraceLog(LOG_ERROR, TextFormat("Please request more boids than threads (%d)! Defaulting to 1000", NUM_THREADS));
+    if (num_boids < num_threads) {
+        TraceLog(LOG_ERROR, TextFormat("Please request more boids than threads (%d)! Defaulting to 1000", num_threads));
         num_boids = 1000;
     }
 
