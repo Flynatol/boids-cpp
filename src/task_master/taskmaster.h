@@ -10,9 +10,8 @@
 
 struct TaskMaster;
 
-// Num threads doesn't include the main thread -- so we're spawning the hardware thread number -1 for main and -1 for OS stuff.
-//const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 2, (uint32_t) 64);
-const uint32_t num_threads = 1;
+// Spawn one less worker thread than number of threads the system has
+const uint32_t num_threads = std::min(std::thread::hardware_concurrency() - 1, (uint32_t) 64);
 
 BOOLEAN nanosleep(LONGLONG ns);
 

@@ -161,7 +161,6 @@ void populate_map2(TaskMaster *task_master, TaskSync *task_monitor, populate_arg
                 .sync = task_monitor,
                 .on_complete =  (void *) (+[](TaskMaster *task_master, Task *current_task) {
                     auto old_args = ((populate_args *) current_task->argument_struct);
-
                 }),
             }
         );
@@ -248,6 +247,15 @@ static Mesh GenMeshCustom()
     return mesh;
 }
 
+bool any_nan(__m256 vector) {
+    ExtractVec<float, __m256> vec = { vector };
+
+    for (int i = 0; i < 8; i++) {
+        if (std::isnan(vec.data[i])) return true;
+    }
+
+    return false;
+}
 
 inline void update_cell2(const int x, const int y, const Rules *rules, const BoidList *boid_list) {
     const auto world_height = boid_map->m_cell_size * boid_map->m_ysize;
@@ -422,7 +430,7 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
 
         auto home_index_x_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_and_si256(homes_vec, _mm256_set1_epi32(15)), _mm256_set1_epi32(1)));
         auto home_index_y_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4)), _mm256_set1_epi32(1)));
-
+        
         auto home_loc_x_vec = _mm256_fmadd_ps(home_index_x_vec, _mm256_set1_ps((float) ((world_width - rules->edge_width * 2) / (16 + 1))), ew);
         auto home_loc_y_vec = _mm256_fmadd_ps(home_index_y_vec, _mm256_set1_ps((float) ((world_height - rules->edge_width * 2) / (9 + 1))), ew);
 
@@ -432,7 +440,6 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
         vxs_out = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), vxs_out);
         vys_out = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), vys_out);
 
-
 #ifndef RUNNER_STORE
         __m256 temp = _mm256_add_ps(_mm256_set1_ps((float)current_boid), _mm256_set_ps(7., 6., 5., 4., 3., 2., 1., 0.));
         __m256 out_mask = _mm256_cmp_ps(temp, _mm256_set1_ps(cell_end), _CMP_LT_OS);
@@ -440,6 +447,12 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
 
         auto xs_out = _mm256_add_ps(current_xs_vec, _mm256_and_ps(vxs_out, out_mask));
         auto ys_out = _mm256_add_ps(current_ys_vec, _mm256_and_ps(vys_out, out_mask));
+
+        //auto xs_out = _mm256_add_ps(current_xs_vec, vxs_out);
+        //auto ys_out = _mm256_add_ps(current_ys_vec, vys_out);
+        
+        //vxs_out = _mm256_and_ps(vxs_out, out_mask);
+        //vys_out = _mm256_and_ps(vys_out, out_mask);
 
         _mm256_storeu_ps(&xs[current_boid], xs_out);
         _mm256_storeu_ps(&ys[current_boid], ys_out);
@@ -745,11 +758,6 @@ int main(int argc, char* argv[]) {
 
     SetTraceLogLevel(LOG_ALL);
 
-    if (num_boids < num_threads) {
-        TraceLog(LOG_ERROR, TextFormat("Please request more boids than threads (%d)! Defaulting to 1000", num_threads));
-        num_boids = 1000;
-    }
-
     InitWindow(0, 0, "RayLib Boids!");
     SetTargetFPS(FRAME_RATE_LIMIT);
 
@@ -902,7 +910,6 @@ int main(int argc, char* argv[]) {
 
     float camera_zoom = (1. / world_size_mult);
 
-    DEBUG("Starting main loop");
     while (WindowShouldClose() == false){
         auto t_update_start = TIME_NOW;
 
