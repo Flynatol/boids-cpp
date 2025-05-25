@@ -32,7 +32,8 @@
 
 
 #define TRACY_CALLSTACK 32
-#include "Tracy.hpp"
+#define TRACY_ENABLE
+#include <tracy/Tracy.hpp>
 
 #pragma comment(lib, "Winmm.lib")
 
@@ -42,8 +43,7 @@ const uint16_t SIGHT_RANGE = 100;
 #define FRAME_RATE_LIMIT 165
 #define BOID_DENSITY_MAGIC_NUMBER 2304.0
 #define CELL_WIDTH 100
-#define USE_MULTICORE
-#define DEBUG_ENABLED
+//#define DEBUG_ENABLED
 
 //#define RUNNER_STORE
 
@@ -126,21 +126,21 @@ inline void place_boid(Boid boid_to_place) {
     boid_map->safety[map_pos].unlock();
 }
 
-void block_populate(int thread_start_pos) {
+void block_populate(uint32_t thread_start_pos) {
     //TODO work out a better fix for this
     //We need to work out a better way to allocate work between threads
 
-    auto t = thread_start_pos == ((num_threads - 1) * (boid_list->m_size / num_threads));
-    auto correction = boid_list->m_size - (thread_start_pos + (boid_list->m_size / num_threads));
+    bool t = thread_start_pos == ((num_threads - 1) * (boid_list->m_size / num_threads));
+    uint32_t correction = boid_list->m_size - (thread_start_pos + (boid_list->m_size / num_threads));
 
-    for (int i = 0; i < (boid_list->m_size) / num_threads + correction * t; i++) {
+    for (uint32_t i = 0; i < (boid_list->m_size) / num_threads + correction * t; i++) {
         place_boid(thread_start_pos + i);
     }
 }
 
-inline void populate_n(uint32_t start, uint32_t task_size) {
+inline void populate_n(const uint32_t start, const uint32_t task_size) {
     ZoneScoped;
-    for (uint32_t i = start; i < start + task_size; i++) {
+    for (int32_t i = start; i < start + task_size; i++) {
         place_boid(i);
     }
 }
@@ -265,22 +265,25 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
     Boid cell_begin = boid_map->m_boid_map[y * boid_map->m_xsize + x];
 
     // If this cell is empty then just return
-    if (cell_begin == -1 ) return;
-    Boid cell_end = cell_begin + boid_list->m_boid_store->depth[cell_begin];
+    if (cell_begin == -1) return;
 
-    const auto xs = boid_list->m_boid_store->xs;
-    const auto ys = boid_list->m_boid_store->ys;
-    const auto vxs = boid_list->m_boid_store->vxs;
-    const auto vys = boid_list->m_boid_store->vys;
-    const auto homes = boid_list->m_boid_store->homes;
+    BoidStore* boid_store = boid_list->m_boid_store;
 
+    int32_t* depth = boid_store->depth;
+    Boid cell_end = cell_begin + depth[cell_begin];
+
+    const auto xs = boid_store->xs;
+    const auto ys = boid_store->ys;
+    const auto vxs = boid_store->vxs;
+    const auto vys = boid_store->vys;
+    const auto homes = boid_store->homes;
     const auto ads_vec = _mm256_set1_ps(rules->avoid_distance_squared);
     const auto srs_vec = _mm256_set1_ps(rules->sight_range_squared);
     const auto af_vec  = _mm256_set1_ps(rules->avoid_factor);
 
     for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid += 8) {
-        auto current_xs_vec = _mm256_loadu_ps(&xs[current_boid]);
-        auto current_ys_vec = _mm256_loadu_ps(&ys[current_boid]);
+        auto current_xs_vec = _mm256_load_ps(&xs[current_boid]);
+        auto current_ys_vec = _mm256_load_ps(&ys[current_boid]);
 
         //Tracking vecs
         __m256 sep_x_vec = _mm256_set1_ps(0.);
@@ -306,17 +309,17 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
                 if (current != -1) {
                     if (row_begin == -1) row_begin = current;
                     //This line is probably bad too
-                    row_end = current + boid_list->m_boid_store->depth[current];
+                    row_end = current + depth[current];
                 }
             }
 
             // For each block of boids in current row
             for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
-                auto nearby_xs_vec = _mm256_loadu_ps(&xs[nearby_boid]);
-                auto nearby_ys_vec = _mm256_loadu_ps(&ys[nearby_boid]);
+                auto nearby_xs_vec = _mm256_load_ps(&xs[nearby_boid]);
+                auto nearby_ys_vec = _mm256_load_ps(&ys[nearby_boid]);
 
-                auto nearby_vxs_vec = _mm256_loadu_ps(&vxs[nearby_boid]);
-                auto nearby_vys_vec = _mm256_loadu_ps(&vys[nearby_boid]);
+                auto nearby_vxs_vec = _mm256_load_ps(&vxs[nearby_boid]);
+                auto nearby_vys_vec = _mm256_load_ps(&vys[nearby_boid]);
 
                 for (int i = 0; i < 8; i++) {
                     const auto xs_delta = _mm256_sub_ps(current_xs_vec, nearby_xs_vec);
@@ -368,8 +371,8 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
         __m256 isc_mask = _mm256_castsi256_ps(_mm256_cmpgt_epi32(isc, _mm256_set1_epi32(0)));
 
         //Avoidance
-        auto vxs_out = _mm256_loadu_ps(&vxs[current_boid]);
-        auto vys_out = _mm256_loadu_ps(&vys[current_boid]);
+        auto vxs_out = _mm256_load_ps(&vxs[current_boid]);
+        auto vys_out = _mm256_load_ps(&vys[current_boid]);
 
         vxs_out = _mm256_fmadd_ps(sep_x_vec, af_vec, vxs_out);
         vys_out = _mm256_fmadd_ps(sep_y_vec, af_vec, vys_out);
@@ -426,7 +429,7 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
 
         ////////////////////////////////////////////
 
-        const auto homes_vec = _mm256_loadu_si256((const __m256i*) &homes[current_boid]);
+        const auto homes_vec = _mm256_load_si256((const __m256i*) &homes[current_boid]);
 
         auto home_index_x_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_and_si256(homes_vec, _mm256_set1_epi32(15)), _mm256_set1_epi32(1)));
         auto home_index_y_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4)), _mm256_set1_epi32(1)));
@@ -625,6 +628,13 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
 
 }
 
+static void swap_buffers(TaskMaster* task_master, Task* current_task) {
+    ZoneScoped;
+    auto temp = boid_list->m_boid_store;
+    boid_list->m_boid_store = boid_list->m_backbuffer;
+    boid_list->m_backbuffer = temp;
+}
+
 void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
     ZoneScoped;
     task_master->lock.lock();
@@ -634,11 +644,15 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
     uint32_t tasks_added = 0;
 
     int counter = 0;
-    // this is taking about 0.6 ms
-    for (int i = 0; i < boid_map->m_xsize * boid_map->m_ysize; i++) {
-        Boid current = boid_map->m_boid_map[i];
-        arg_list->index_buffer[i] = counter;
-        counter += (current != -1) * boid_list->m_boid_store->depth[current];
+    const int num_cells = boid_map->m_xsize * boid_map->m_ysize;
+    Boid* ib = arg_list->index_buffer;
+    const Boid* map = boid_map->m_boid_map;
+    const int32_t* depth = boid_list->m_boid_store->depth;
+
+    for (int i = 0; i < num_cells; i++) {
+        ib[i] = counter;
+        const Boid current = map[i];
+        counter += (current != -1) * depth[current];
     }
 
     auto pre_task_gen = TIME_NOW;
@@ -650,12 +664,7 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
                 .task_type = TaskType::REBUILD,
                 .argument_struct = &arg_list[y],
                 .sync = task_monitor,
-                .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
-                        ZoneScoped
-                        auto temp_boid_store = boid_list->m_boid_store;
-                        boid_list->m_boid_store = boid_list->m_backbuffer;
-                        boid_list->m_backbuffer = temp_boid_store;
-                    }),
+                .on_complete = (void *) swap_buffers,
             }
         );
 
@@ -671,6 +680,8 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
     //Go!
     task_master->lock.unlock();
 }
+
+
 
 Matrix MatrixLookDown(Vector3 eye)
 {
@@ -761,8 +772,8 @@ int main(int argc, char* argv[]) {
     InitWindow(0, 0, "RayLib Boids!");
     SetTargetFPS(FRAME_RATE_LIMIT);
 
-    const int screen_width = GetScreenWidth();
-    const int screen_height = GetScreenHeight();
+    const int32_t screen_width = GetScreenWidth();
+    const int32_t screen_height = GetScreenHeight();
 
     DEBUG("Using %d args", argc);
     DEBUG("Using %d threads", num_threads);
@@ -786,9 +797,9 @@ int main(int argc, char* argv[]) {
     DEBUG("viewPos at: %d", boid_shader.locs[SHADER_LOC_VECTOR_VIEW]);
     DEBUG("instanceTransform at: %d", boid_shader.locs[SHADER_LOC_MATRIX_MODEL]);
 
-    Material matInstances = LoadMaterialDefault();
-    matInstances.shader = boid_shader;
-    matInstances.maps[MATERIAL_MAP_DIFFUSE].color = RED;
+    Material mat_instances = LoadMaterialDefault();
+    mat_instances.shader = boid_shader;
+    mat_instances.maps[MATERIAL_MAP_DIFFUSE].color = RED;
 
     Rules rules = {
         .avoid_distance_squared = 1000.f,
@@ -798,9 +809,9 @@ int main(int argc, char* argv[]) {
         .alignment_factor = 0.05f,
         .cohesion_factor = 0.0005f,
         .edge_width = 300,
-        .edge_factor = 0.05,
-        .rand = 0.1,
-        .homing = 0.0000005,
+        .edge_factor = 0.05f,
+        .rand = 0.1f,
+        .homing = 0.0000005f,
         .show_lines = false,
         .min_speed = 2,
         .max_speed = 3,
@@ -810,14 +821,15 @@ int main(int argc, char* argv[]) {
 
     PerfMonitor perf_monitor;
 
-    const uint32_t world_size_mult = std::ceil(sqrt((BOID_DENSITY_MAGIC_NUMBER / ((double) screen_height)) * ((double)num_boids / (double) screen_width )));
+    const int32_t world_size_mult = (uint32_t) std::ceil(sqrt((BOID_DENSITY_MAGIC_NUMBER / ((double) screen_height)) * ((double)num_boids / (double) screen_width )));
 
-    const int world_width = screen_width * world_size_mult;
-    const int world_height = screen_height * world_size_mult;
+    const float world_width = (float) (screen_width * world_size_mult);
+    const float world_height = (float) (screen_height * world_size_mult);
 
-    Camera2D cam = { 0 };
-    cam.zoom = static_cast<float>(screen_width) / world_width;
-
+    Camera2D cam = {
+        .zoom = (float) (screen_width) / (float) world_width,
+    };
+    
     Camera camera = {
         .position = Vector3 {world_width/2.f, 200.f, world_height/2.f},
         .target = Vector3 {world_width/2.f, 0.0f, world_height/2.f},
@@ -840,7 +852,7 @@ int main(int argc, char* argv[]) {
     std::uniform_real_distribution<float> height_distribution2 (-home_height / 2.f, home_height / 2.f);
 
     //Populate some boids
-    for (int i = 0; i < boid_list->m_size; i++) {
+    for (int32_t i = 0; i < boid_list->m_size; i++) {
         boid_list->m_boid_store->index_next[i] = -1;
         boid_list->m_boid_store->vxs[i] = (std::rand() % 3) - 1;
         boid_list->m_boid_store->vys[i] = (std::rand() % 3) - 1;
@@ -906,7 +918,7 @@ int main(int argc, char* argv[]) {
     update_boids2(args_update, &task_master, &task_update);
     task_update.wait();
 
-    rlEnableShader(matInstances.shader.id);
+    rlEnableShader(mat_instances.shader.id);
 
     float camera_zoom = (1. / world_size_mult);
 
@@ -964,7 +976,7 @@ int main(int argc, char* argv[]) {
 
         auto t_start_drawing = TIME_NOW;
         FrameMarkStart("Render");
-        render(&ui, rules, cam, camera, &tri, &matInstances);
+        render(&ui, rules, cam, camera, &tri, &mat_instances);
         FrameMarkEnd("Render");
         auto t_end_drawing = TIME_NOW;
 

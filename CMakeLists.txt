@@ -2,8 +2,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-
-
+include(FetchContent)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Release>:Release>")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -29,6 +28,16 @@ add_subdirectory(thirdparty/imgui-docking)
 add_subdirectory(thirdparty/glfw)
 add_subdirectory(thirdparty/raylib)
 add_subdirectory(thirdparty/rlimgui)
+
+FetchContent_Declare(
+	tracy
+	GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+	GIT_TAG v0.11.1
+	GIT_SHALLOW TRUE
+	GIT_PROGRESS TRUE
+)
+
+FetchContent_MakeAvailable(tracy)
 
 # MY_SOURCES is defined to be a list of all the source files for my game
 # DON'T ADD THE SOURCES BY HAND, they are already added with this macro
@@ -69,8 +78,8 @@ if(MSVC) # If using the VS compiler...
 
 endif()
 
-target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
+#target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
 
-target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE raylib imgui rlimgui glfw)
+target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE raylib imgui rlimgui glfw TracyClient)
 
 target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE )

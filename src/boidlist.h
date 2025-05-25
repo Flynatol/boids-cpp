@@ -23,7 +23,7 @@ class BoidList {
         BoidStore *m_boid_store;
         BoidStore *m_backbuffer;
                              
-        int m_size;
+        uint32_t m_size;
 
     public:
         BoidList(int size);

@@ -18,7 +18,7 @@ BOOLEAN nanosleep(LONGLONG ns);
 struct TaskSync {
     Lock tc_lock;
 
-    volatile int task_counter = 0;
+    volatile uint32_t task_counter = 0;
     
     void wait() {
         while (1) {
@@ -48,7 +48,7 @@ struct TaskMaster {
     // Enable thread sleeping (tiny performance decrease but means performance usage scales down when there are few boids)
     bool sleep_enabled = true;
 
-    RingBuffer<Task, 4096> ts_task_buffer;
+    RingBufferMPMC<Task, 4096> ts_task_buffer;
     std::thread threads[64];
 
     Lock lock;

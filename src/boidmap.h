@@ -10,9 +10,9 @@ typedef int32_t Boid;
 
 class BoidMap {
     public:
-        int m_ysize;
-        int m_xsize;
-        int m_cell_size; 
+        int32_t m_ysize;
+        int32_t m_xsize;
+        int32_t m_cell_size; 
         Boid *m_boid_map;
         Boid *m_index_buffer;
         Lock *safety;
@@ -32,7 +32,6 @@ class BoidMap {
             return m_boid_map[y * m_xsize + x];
         }
 
-        //Returns the nearest map position (in case the supplied position is out of bounds of the map)
         //Returns the nearest map position (in case the supplied position is out of bounds of the map)
         inline Boid get_map_pos_nearest(const int32_t x, const int32_t y) const {
             int col = std::min((std::max(x, 0)), m_cell_size * m_xsize - 1) / m_cell_size;
