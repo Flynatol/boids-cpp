@@ -15,8 +15,6 @@
 #include <future>
 #include <algorithm>
 #include <limits>
-#include <execution>
-#include <atomic>
 #include <immintrin.h>
 
 #define NO_FONT_AWESOME
@@ -70,8 +68,22 @@ typedef int32_t Boid;
 BoidList* boid_list;
 BoidMap* boid_map;
 Boid* boid_cell_scratch;
-std::atomic<int32_t>* boid_cell_counts_atomic;
-std::atomic<int32_t>* boid_cell_offsets_atomic;
+int32_t* boid_partition_cell_offsets;
+rebuild_partition_args* rebuild_partition_task_args;
+
+struct RebuildPassContext {
+    BoidStore* src;
+    BoidStore* dst;
+    uint32_t boid_count;
+    uint32_t num_cells;
+    uint32_t partition_count;
+    float inv_cell_size;
+    int32_t max_col;
+    int32_t max_row;
+    int32_t xsize;
+};
+
+RebuildPassContext rebuild_pass_ctx;
 
 struct PerfMonitor {
     int tick_counter = 0;
@@ -542,6 +554,63 @@ inline void row_runner(const int y, const Rules *rules) {
 #endif
 }
 
+inline Boid rebuild_calc_cell(float x, float y) {
+    int32_t col = (int32_t) (x * rebuild_pass_ctx.inv_cell_size);
+    int32_t row = (int32_t) (y * rebuild_pass_ctx.inv_cell_size);
+
+    col = (col < 0) ? 0 : ((col > rebuild_pass_ctx.max_col) ? rebuild_pass_ctx.max_col : col);
+    row = (row < 0) ? 0 : ((row > rebuild_pass_ctx.max_row) ? rebuild_pass_ctx.max_row : row);
+
+    return row * rebuild_pass_ctx.xsize + col;
+}
+
+inline void rebuild_count_partition(const uint32_t partition_id) {
+    const uint32_t begin = (rebuild_pass_ctx.boid_count * partition_id) / rebuild_pass_ctx.partition_count;
+    const uint32_t end = (rebuild_pass_ctx.boid_count * (partition_id + 1)) / rebuild_pass_ctx.partition_count;
+
+    int32_t* local_counts = boid_partition_cell_offsets + ((size_t) partition_id * rebuild_pass_ctx.num_cells);
+    const float* src_xs = rebuild_pass_ctx.src->xs;
+    const float* src_ys = rebuild_pass_ctx.src->ys;
+
+    memset(local_counts, 0, sizeof(int32_t) * rebuild_pass_ctx.num_cells);
+
+    for (uint32_t boid = begin; boid < end; boid++) {
+        const Boid cell = rebuild_calc_cell(src_xs[boid], src_ys[boid]);
+        boid_cell_scratch[boid] = cell;
+        local_counts[cell]++;
+    }
+}
+
+inline void rebuild_scatter_partition(const uint32_t partition_id) {
+    const uint32_t begin = (rebuild_pass_ctx.boid_count * partition_id) / rebuild_pass_ctx.partition_count;
+    const uint32_t end = (rebuild_pass_ctx.boid_count * (partition_id + 1)) / rebuild_pass_ctx.partition_count;
+
+    int32_t* local_offsets = boid_partition_cell_offsets + ((size_t) partition_id * rebuild_pass_ctx.num_cells);
+
+    const float* src_xs = rebuild_pass_ctx.src->xs;
+    const float* src_ys = rebuild_pass_ctx.src->ys;
+    const float* src_vxs = rebuild_pass_ctx.src->vxs;
+    const float* src_vys = rebuild_pass_ctx.src->vys;
+    const int32_t* src_homes = rebuild_pass_ctx.src->homes;
+
+    float* dst_xs = rebuild_pass_ctx.dst->xs;
+    float* dst_ys = rebuild_pass_ctx.dst->ys;
+    float* dst_vxs = rebuild_pass_ctx.dst->vxs;
+    float* dst_vys = rebuild_pass_ctx.dst->vys;
+    int32_t* dst_homes = rebuild_pass_ctx.dst->homes;
+
+    for (uint32_t boid = begin; boid < end; boid++) {
+        const Boid cell = boid_cell_scratch[boid];
+        const Boid dst_index = local_offsets[cell]++;
+
+        dst_xs[dst_index] = src_xs[boid];
+        dst_ys[dst_index] = src_ys[boid];
+        dst_vxs[dst_index] = src_vxs[boid];
+        dst_vys[dst_index] = src_vys[boid];
+        dst_homes[dst_index] = src_homes[boid];
+    }
+}
+
 
 void runner(TaskMaster *task_master, uint8_t thread_id) {
     while(1) {
@@ -558,6 +627,12 @@ void runner(TaskMaster *task_master, uint8_t thread_id) {
             case TaskType::REBUILD: {
                     auto s = ((rebuild_args *) current_task.argument_struct);
                     write_row_to_list(s->y, s->index_buffer);
+                }
+                break;
+
+            case TaskType::REBUILD_SCATTER: {
+                    auto s = ((rebuild_partition_args *) current_task.argument_struct);
+                    rebuild_scatter_partition(s->partition_id);
                 }
                 break;
 
@@ -645,80 +720,47 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
     ZoneScoped;
     auto* src = boid_list->m_boid_store;
     auto* dst = boid_list->m_backbuffer;
-
-    const float* src_xs = src->xs;
-    const float* src_ys = src->ys;
-    const float* src_vxs = src->vxs;
-    const float* src_vys = src->vys;
-    const int32_t* src_homes = src->homes;
-
-    float* dst_xs = dst->xs;
-    float* dst_ys = dst->ys;
-    float* dst_vxs = dst->vxs;
-    float* dst_vys = dst->vys;
-    int32_t* dst_homes = dst->homes;
-
     const uint32_t boid_count = boid_list->m_size;
     const uint32_t num_cells = boid_map->m_xsize * boid_map->m_ysize;
+    const uint32_t partition_count = num_threads;
 
     Boid* cell_offsets = arg_list->index_buffer;
     Boid* cell_counts = boid_map->m_index_buffer;
 
-    static uint32_t cached_boid_count = 0;
-    static uint32_t cached_chunk_count = 0;
-    static std::vector<uint32_t> chunk_ids;
-
-    constexpr uint32_t chunk_size = 16384;
-    const uint32_t chunk_count = (boid_count + chunk_size - 1) / chunk_size;
-
-    const float inv_cell_size = 1.0f / (float) boid_map->m_cell_size;
-    const int32_t max_col = boid_map->m_xsize - 1;
-    const int32_t max_row = boid_map->m_ysize - 1;
-    const int32_t xsize = boid_map->m_xsize;
-
-    const auto calc_cell = [&](float x, float y) -> Boid {
-        int32_t col = (int32_t) (x * inv_cell_size);
-        int32_t row = (int32_t) (y * inv_cell_size);
-
-        col = (col < 0) ? 0 : ((col > max_col) ? max_col : col);
-        row = (row < 0) ? 0 : ((row > max_row) ? max_row : row);
-
-        return row * xsize + col;
+    rebuild_pass_ctx = RebuildPassContext {
+        .src = src,
+        .dst = dst,
+        .boid_count = boid_count,
+        .num_cells = num_cells,
+        .partition_count = partition_count,
+        .inv_cell_size = 1.0f / (float) boid_map->m_cell_size,
+        .max_col = boid_map->m_xsize - 1,
+        .max_row = boid_map->m_ysize - 1,
+        .xsize = boid_map->m_xsize,
     };
 
-    if (cached_boid_count != boid_count || cached_chunk_count != chunk_count) {
-        chunk_ids.resize(chunk_count);
-        for (uint32_t i = 0; i < chunk_count; i++) {
-            chunk_ids[i] = i;
-        }
-        cached_boid_count = boid_count;
-        cached_chunk_count = chunk_count;
-    }
-
-    for (uint32_t cell = 0; cell < num_cells; cell++) {
-        boid_cell_counts_atomic[cell].store(0, std::memory_order_relaxed);
-    }
-
-    std::for_each(std::execution::par, chunk_ids.begin(), chunk_ids.end(), [&](uint32_t chunk_id) {
-        const uint32_t begin = chunk_id * chunk_size;
-        const uint32_t end = std::min(begin + chunk_size, boid_count);
-
-        for (uint32_t boid = begin; boid < end; boid++) {
-            const Boid cell = calc_cell(src_xs[boid], src_ys[boid]);
-            boid_cell_scratch[boid] = cell;
-            boid_cell_counts_atomic[cell].fetch_add(1, std::memory_order_relaxed);
-        }
-    });
-
-    for (uint32_t cell = 0; cell < num_cells; cell++) {
-        cell_counts[cell] = boid_cell_counts_atomic[cell].load(std::memory_order_relaxed);
+    for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
+        rebuild_count_partition(partition_id);
     }
 
     Boid running = 0;
     for (uint32_t cell = 0; cell < num_cells; cell++) {
-        const Boid count = cell_counts[cell];
+        Boid count = 0;
+        for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
+            int32_t* local_counts = boid_partition_cell_offsets + ((size_t) partition_id * num_cells);
+            count += local_counts[cell];
+        }
+
+        cell_counts[cell] = count;
         cell_offsets[cell] = running;
-        boid_cell_offsets_atomic[cell].store(running, std::memory_order_relaxed);
+
+        Boid local_base = running;
+        for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
+            int32_t* local_counts = boid_partition_cell_offsets + ((size_t) partition_id * num_cells);
+            const Boid local_count = local_counts[cell];
+            local_counts[cell] = local_base;
+            local_base += local_count;
+        }
 
         if (count > 0) {
             boid_map->m_boid_map[cell] = running;
@@ -729,21 +771,25 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
         }
     }
 
-    std::for_each(std::execution::par, chunk_ids.begin(), chunk_ids.end(), [&](uint32_t chunk_id) {
-        const uint32_t begin = chunk_id * chunk_size;
-        const uint32_t end = std::min(begin + chunk_size, boid_count);
+    TaskSync scatter_sync;
+    uint32_t scatter_tasks_added = 0;
 
-        for (uint32_t boid = begin; boid < end; boid++) {
-            const Boid cell = boid_cell_scratch[boid];
-            const Boid dst_index = boid_cell_offsets_atomic[cell].fetch_add(1, std::memory_order_relaxed);
+    task_master->lock.lock();
+    for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
+        task_master->ts_task_buffer.push_back(
+            Task {
+                .task_type = TaskType::REBUILD_SCATTER,
+                .argument_struct = &rebuild_partition_task_args[partition_id],
+                .sync = &scatter_sync,
+                .on_complete = NULL,
+            }
+        );
+        scatter_tasks_added++;
+    }
+    scatter_sync.task_counter += scatter_tasks_added;
+    task_master->lock.unlock();
 
-            dst_xs[dst_index] = src_xs[boid];
-            dst_ys[dst_index] = src_ys[boid];
-            dst_vxs[dst_index] = src_vxs[boid];
-            dst_vys[dst_index] = src_vys[boid];
-            dst_homes[dst_index] = src_homes[boid];
-        }
-    });
+    scatter_sync.wait();
 
     for (uint32_t boid = 0; boid < boid_count; boid++) {
         dst->index_next[boid] = boid + 1;
@@ -963,8 +1009,8 @@ int main(int argc, char* argv[]) {
 
     Boid *index_buffer = (Boid *) malloc(boid_map->m_xsize * boid_map->m_ysize * sizeof(Boid));
     boid_cell_scratch = (Boid *) malloc(boid_list->m_size * sizeof(Boid));
-    boid_cell_counts_atomic = new std::atomic<int32_t>[boid_map->m_xsize * boid_map->m_ysize];
-    boid_cell_offsets_atomic = new std::atomic<int32_t>[boid_map->m_xsize * boid_map->m_ysize];
+    boid_partition_cell_offsets = (int32_t *) malloc(sizeof(int32_t) * num_threads * boid_map->m_xsize * boid_map->m_ysize);
+    rebuild_partition_task_args = new rebuild_partition_args[num_threads];
 
     for (uint32_t i = 0; i < boid_map->m_ysize; i++) {
         args_update[i] = row_runner_args {
@@ -977,6 +1023,12 @@ int main(int argc, char* argv[]) {
         args_rebuild[i] = rebuild_args {
             .y = i,
             .index_buffer = index_buffer,
+        };
+    }
+
+    for (uint32_t partition_id = 0; partition_id < num_threads; partition_id++) {
+        rebuild_partition_task_args[partition_id] = rebuild_partition_args {
+            .partition_id = partition_id,
         };
     }
 

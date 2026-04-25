@@ -8,6 +8,7 @@
 enum TaskType {
     POPULATE,
     REBUILD,
+    REBUILD_SCATTER,
     ROW_RUNNER,
     STOP,
 };
@@ -29,4 +30,8 @@ struct row_runner_args {
     Rules *rules; 
     row_runner_args* arg_store;
     populate_args* pop_args;
+};
+
+struct rebuild_partition_args {
+    uint32_t partition_id;
 };
