@@ -117,16 +117,17 @@ inline void update_cell2(const int x, const int y, const Rules* rules, const Boi
 
     if (cell_begin == -1) return;
 
-    BoidStore* boid_store = boid_list->m_boid_store;
+    const BoidStore* src_store = boid_list->m_boid_store;
+    BoidStore* dst_store = boid_list->m_backbuffer;
 
-    int32_t* depth = boid_store->depth;
+    const int32_t* depth = src_store->depth;
     Boid cell_end = cell_begin + depth[cell_begin];
 
-    const auto xs = boid_store->xs;
-    const auto ys = boid_store->ys;
-    const auto vxs = boid_store->vxs;
-    const auto vys = boid_store->vys;
-    const auto homes = boid_store->homes;
+    const auto xs = src_store->xs;
+    const auto ys = src_store->ys;
+    const auto vxs = src_store->vxs;
+    const auto vys = src_store->vys;
+    const auto homes = src_store->homes;
     const auto ads_vec = _mm256_set1_ps(rules->avoid_distance_squared);
     const auto srs_vec = _mm256_set1_ps(rules->sight_range_squared);
     const auto af_vec = _mm256_set1_ps(rules->avoid_factor);
@@ -218,14 +219,28 @@ inline void update_cell2(const int x, const int y, const Rules* rules, const Boi
 
         auto cvt_isc = _mm256_cvtepi32_ps(isc);
 
+#ifdef APPROXIMATE_NEIGHBOR_AVERAGES
+        auto inv_isc = _mm256_rcp_ps(cvt_isc);
+        inv_isc = _mm256_mul_ps(inv_isc, _mm256_sub_ps(_mm256_set1_ps(2.0f), _mm256_mul_ps(cvt_isc, inv_isc)));
+        inv_isc = _mm256_and_ps(inv_isc, isc_mask);
+
+        avg_vx_vec = _mm256_mul_ps(avg_vx_vec, inv_isc);
+        avg_vy_vec = _mm256_mul_ps(avg_vy_vec, inv_isc);
+#else
         avg_vx_vec = _mm256_div_ps(avg_vx_vec, cvt_isc);
         avg_vy_vec = _mm256_div_ps(avg_vy_vec, cvt_isc);
+#endif
 
         vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->alignment_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_vx_vec, vxs_out)), vxs_out);
         vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->alignment_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_vy_vec, vys_out)), vys_out);
 
+#ifdef APPROXIMATE_NEIGHBOR_AVERAGES
+        avg_x_vec = _mm256_mul_ps(avg_x_vec, inv_isc);
+        avg_y_vec = _mm256_mul_ps(avg_y_vec, inv_isc);
+#else
         avg_x_vec = _mm256_div_ps(avg_x_vec, cvt_isc);
         avg_y_vec = _mm256_div_ps(avg_y_vec, cvt_isc);
+#endif
 
         vxs_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->cohesion_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_x_vec, current_xs_vec)), vxs_out);
         vys_out = _mm256_fmadd_ps(_mm256_set1_ps(rules->cohesion_factor), _mm256_and_ps(isc_mask, _mm256_sub_ps(avg_y_vec, current_ys_vec)), vys_out);
@@ -261,7 +276,7 @@ inline void update_cell2(const int x, const int y, const Rules* rules, const Boi
         vxs_out = _mm256_mul_ps(multiplers, vxs_out);
         vys_out = _mm256_mul_ps(multiplers, vys_out);
 
-        const auto homes_vec = _mm256_load_si256((const __m256i*) &homes[current_boid]);
+        const auto homes_vec = _mm256_loadu_si256((const __m256i*) &homes[current_boid]);
 
         auto home_index_x_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_and_si256(homes_vec, _mm256_set1_epi32(15)), _mm256_set1_epi32(1)));
         auto home_index_y_vec = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_srlv_epi32(homes_vec, _mm256_set1_epi32(4)), _mm256_set1_epi32(1)));
@@ -275,28 +290,40 @@ inline void update_cell2(const int x, const int y, const Rules* rules, const Boi
         vxs_out = _mm256_fmadd_ps(dx_vec, _mm256_set1_ps(rules->homing), vxs_out);
         vys_out = _mm256_fmadd_ps(dy_vec, _mm256_set1_ps(rules->homing), vys_out);
 
-#ifndef RUNNER_STORE
         __m256 temp = _mm256_add_ps(_mm256_set1_ps((float) current_boid), _mm256_set_ps(7., 6., 5., 4., 3., 2., 1., 0.));
         __m256 out_mask = _mm256_cmp_ps(temp, _mm256_set1_ps(cell_end), _CMP_LT_OS);
 
-        auto xs_out = _mm256_add_ps(current_xs_vec, _mm256_and_ps(vxs_out, out_mask));
-        auto ys_out = _mm256_add_ps(current_ys_vec, _mm256_and_ps(vys_out, out_mask));
+        auto xs_out = _mm256_add_ps(current_xs_vec, vxs_out);
+        auto ys_out = _mm256_add_ps(current_ys_vec, vys_out);
 
-        _mm256_storeu_ps(&xs[current_boid], xs_out);
-        _mm256_storeu_ps(&ys[current_boid], ys_out);
-#endif
-
-        _mm256_storeu_ps(&vxs[current_boid], vxs_out);
-        _mm256_storeu_ps(&vys[current_boid], vys_out);
+        if (current_boid + 8 <= cell_end) {
+            _mm256_storeu_ps(&dst_store->xs[current_boid], xs_out);
+            _mm256_storeu_ps(&dst_store->ys[current_boid], ys_out);
+            _mm256_storeu_ps(&dst_store->vxs[current_boid], vxs_out);
+            _mm256_storeu_ps(&dst_store->vys[current_boid], vys_out);
+            _mm256_storeu_si256((__m256i*) &dst_store->homes[current_boid], homes_vec);
+        } else {
+            const auto out_mask_i = _mm256_castps_si256(out_mask);
+            _mm256_maskstore_ps(&dst_store->xs[current_boid], out_mask_i, xs_out);
+            _mm256_maskstore_ps(&dst_store->ys[current_boid], out_mask_i, ys_out);
+            _mm256_maskstore_ps(&dst_store->vxs[current_boid], out_mask_i, vxs_out);
+            _mm256_maskstore_ps(&dst_store->vys[current_boid], out_mask_i, vys_out);
+            _mm256_maskstore_epi32((int*) &dst_store->homes[current_boid], out_mask_i, homes_vec);
+        }
     }
 }
 
 inline void row_runner(const int y, const Rules* rules) {
     ZoneScoped;
+    static const bool use_avx512 = boids_cpu_supports_avx512();
 
 #ifndef RUNNER_STORE
     for (int x = 0; x < boid_map->m_xsize; x++) {
-        update_cell2(x, y, rules, boid_list);
+        if (use_avx512) {
+            update_cell2_avx512(x, y, rules, boid_list);
+        } else {
+            update_cell2(x, y, rules, boid_list);
+        }
     }
 #endif
 
@@ -386,13 +413,6 @@ inline void rebuild_scatter_partition(const uint32_t partition_id) {
     }
 }
 
-void swap_buffers() {
-    ZoneScoped;
-    auto temp = boid_list->m_boid_store;
-    boid_list->m_boid_store = boid_list->m_backbuffer;
-    boid_list->m_backbuffer = temp;
-}
-
 } // namespace
 
 bool BoidTaskSpec::execute(BoidTaskMaster*, Task& current_task) {
@@ -450,33 +470,13 @@ void update_boids2(row_runner_args* arg_list, BoidTaskMaster* task_master, TaskS
 
     uint32_t tasks_added = 0;
 
-    for (int y = 0; y < boid_map->m_ysize; y += 2) {
+    for (int y = 0; y < boid_map->m_ysize; y++) {
         task_master->ts_task_buffer.push_back(
             Task {
                 .task_type = TaskType::ROW_RUNNER,
                 .arg = { .row_runner = &arg_list[y] },
                 .sync = task_monitor,
-                .on_complete = +[](BoidTaskMaster* task_master, Task* current_task)
-                {
-                    auto old_args = current_task->arg.row_runner;
-                    uint32_t tasks_added = 0;
-                    task_master->lock.lock();
-
-                    for (int y = 1; y < boid_map->m_ysize; y += 2) {
-                        task_master->ts_task_buffer.push_back(
-                            Task {
-                                .task_type = TaskType::ROW_RUNNER,
-                                .arg = { .row_runner = &old_args->arg_store[y] },
-                                .sync = current_task->sync,
-                                .on_complete = nullptr,
-                            }
-                        );
-                        tasks_added++;
-                    }
-
-                    current_task->sync->task_counter = tasks_added;
-                    task_master->lock.unlock();
-                },
+                .on_complete = nullptr,
             }
         );
 
@@ -492,8 +492,8 @@ void update_boids2(row_runner_args* arg_list, BoidTaskMaster* task_master, TaskS
 
 void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor) {
     ZoneScoped;
-    auto* src = boid_list->m_boid_store;
-    auto* dst = boid_list->m_backbuffer;
+    auto* src = boid_list->m_backbuffer;
+    auto* dst = boid_list->m_boid_store;
     const uint32_t boid_count = boid_list->m_size;
     const uint32_t num_cells = boid_map->m_xsize * boid_map->m_ysize;
     const uint32_t partition_count = num_threads;
@@ -580,8 +580,6 @@ void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster* task_master, TaskSync
             dst->index_next[head + count - 1] = -1;
         }
     }
-
-    swap_buffers();
 
     if (task_monitor != nullptr) {
         task_monitor->task_counter = 0;

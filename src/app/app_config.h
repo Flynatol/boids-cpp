@@ -5,13 +5,12 @@
 
 #include <raylib.h>
 
-#ifndef TRACY_CALLSTACK
-    #define TRACY_CALLSTACK 32
+#ifdef TRACY_ENABLE
+    #ifndef TRACY_CALLSTACK
+        #define TRACY_CALLSTACK 32
+    #endif
 #endif
 
-#ifndef TRACY_ENABLE
-    #define TRACY_ENABLE
-#endif
 #include <tracy/Tracy.hpp>
 
 constexpr float TRIANGLE_SIZE = 5.f;
@@ -28,6 +27,7 @@ constexpr int SHADER_LOC_BOID_VY = 29;
 
 //#define DEBUG_ENABLED
 //#define RUNNER_STORE
+#define APPROXIMATE_NEIGHBOR_AVERAGES
 
 #ifdef DEBUG_ENABLED
     #define TIME_NOW std::chrono::high_resolution_clock::now()

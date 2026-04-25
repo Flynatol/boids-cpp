@@ -77,3 +77,7 @@ extern rebuild_partition_args* rebuild_partition_task_args;
 void populate_map2(BoidTaskMaster* task_master, TaskSync* task_monitor, populate_args* arg_list, uint32_t num_tasks);
 void update_boids2(row_runner_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor);
 void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor);
+
+bool boids_cpu_supports_avx512();
+bool boids_avx512_compiled();
+void update_cell2_avx512(int x, int y, const Rules* rules, const BoidList* boid_list);

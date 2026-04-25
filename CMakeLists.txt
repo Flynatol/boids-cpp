@@ -15,6 +15,8 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE) #link time optimization
 project(cpp_boids)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+option(BOIDS_ENABLE_TRACY "Enable Tracy profiling" OFF)
+option(BOIDS_ENABLE_AVX512 "Build optional AVX-512 simulation fast path" ON)
 
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -44,6 +46,8 @@ FetchContent_MakeAvailable(tracy)
 
 file(GLOB_RECURSE MY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
+set(BOIDS_AVX512_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/sim/simulation_avx512.cpp")
+
 add_executable("${CMAKE_PROJECT_NAME}")
 
 set_property(TARGET "${CMAKE_PROJECT_NAME}" PROPERTY CXX_STANDARD 20)
@@ -53,6 +57,15 @@ target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC GLFW_INCLUDE_NONE=1)
 #target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE -march=native)
 if(MSVC)
 	target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE /arch:AVX2)
+endif()
+
+if(BOIDS_ENABLE_AVX512)
+	if(MSVC)
+		set_source_files_properties("${BOIDS_AVX512_SOURCE}" PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+	else()
+		set_source_files_properties("${BOIDS_AVX512_SOURCE}" PROPERTIES COMPILE_OPTIONS "-mavx512f")
+	endif()
+	set_source_files_properties("${BOIDS_AVX512_SOURCE}" PROPERTIES COMPILE_DEFINITIONS "BOIDS_COMPILE_AVX512=1")
 endif()
 
 if(PRODUCTION_BUILD)
@@ -83,5 +96,10 @@ endif()
 
 #target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
 target_include_directories("${CMAKE_PROJECT_NAME}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories("${CMAKE_PROJECT_NAME}" PRIVATE "${tracy_SOURCE_DIR}/public")
 
-target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE raylib imgui rlimgui glfw TracyClient)
+target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE raylib imgui rlimgui glfw)
+
+if(BOIDS_ENABLE_TRACY)
+	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE TracyClient)
+endif()

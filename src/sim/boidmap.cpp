@@ -20,4 +20,6 @@ BoidMap::BoidMap(const int height, const int width, const int cell_size) {
 BoidMap::~BoidMap() {
     TraceLog(LOG_DEBUG, "Deallocated boid map");
     delete[] m_boid_map;
+    delete[] m_index_buffer;
+    delete[] safety;
 }

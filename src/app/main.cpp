@@ -1,12 +1,15 @@
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
+#include <cstdint>
 
 #include <raylib.h>
 #include <raymath.h>
 
 #include "app/app_config.h"
 #include "app/app_setup.h"
+#include "app/sim_dump.h"
 #include "render/rendering.h"
 #include "sim/simulation.h"
 #include "ui/ui.h"
@@ -15,6 +18,7 @@
 
 int main(int argc, char* argv[]) {
     uint32_t num_boids = (argc > 1) ? atoi(argv[1]) : 2000000;
+    SimDumpWriter sim_dump(argc, argv);
 
     SetTraceLogLevel(LOG_ALL);
 
@@ -61,7 +65,25 @@ int main(int argc, char* argv[]) {
     boid_list = &boid_list_local;
     boid_map = &boid_map_local;
 
+    const bool avx512_compiled = boids_avx512_compiled();
+    const bool avx512_runtime = avx512_compiled && boids_cpu_supports_avx512();
+    TraceLog(
+        LOG_INFO,
+        TextFormat(
+            "SIMD path: AVX2 base, AVX-512 compiled=%s runtime=%s",
+            avx512_compiled ? "yes" : "no",
+            avx512_runtime ? "enabled" : "disabled"
+        )
+    );
+    sim_dump.log_configuration();
+
     PopulateInitialBoids(*boid_list, rules, world_width, world_height);
+
+    std::memcpy(boid_list->m_backbuffer->xs, boid_list->m_boid_store->xs, sizeof(float) * boid_list->m_size);
+    std::memcpy(boid_list->m_backbuffer->ys, boid_list->m_boid_store->ys, sizeof(float) * boid_list->m_size);
+    std::memcpy(boid_list->m_backbuffer->vxs, boid_list->m_boid_store->vxs, sizeof(float) * boid_list->m_size);
+    std::memcpy(boid_list->m_backbuffer->vys, boid_list->m_boid_store->vys, sizeof(float) * boid_list->m_size);
+    std::memcpy(boid_list->m_backbuffer->homes, boid_list->m_boid_store->homes, sizeof(int32_t) * boid_list->m_size);
 
     const uint32_t task_size = 10000;
     const uint32_t num_tasks = (boid_list->m_size + (task_size - 1)) / task_size;
@@ -119,11 +141,9 @@ int main(int argc, char* argv[]) {
     rebuild_list2(args_rebuild, &task_master, &task_rebuild);
     task_rebuild.wait();
 
-    update_boids2(args_update, &task_master, &task_update);
-    task_update.wait();
-
     while (WindowShouldClose() == false) {
         auto t_update_start = TIME_NOW;
+        const double frame_time_seconds = GetFrameTime();
 
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
             Vector2 delta = Vector2Scale(GetMouseDelta(), -1.0f / cam.zoom);
@@ -166,6 +186,8 @@ int main(int argc, char* argv[]) {
         task_rebuild.wait();
         FrameMarkEnd("wait_rebuild");
 
+        sim_dump.tick(frame_time_seconds, *boid_list, *boid_map, world_width, world_height);
+
         update_boids2(args_update, &task_master, &task_update);
 
         auto t_start_drawing = TIME_NOW;
@@ -187,6 +209,18 @@ int main(int argc, char* argv[]) {
 
     task_master.queue_stop_all();
     task_master.join_all();
+
+    delete[] args_populate;
+    delete[] args_update;
+    delete[] args_rebuild;
+    free(index_buffer);
+    free(boid_cell_scratch);
+    free(boid_partition_cell_offsets);
+    delete[] rebuild_partition_task_args;
+
+    UnloadMaterial(mat_instances);
+    UnloadShader(boid_shader);
+    UnloadMesh(tri);
 
     rl_CloseWindow();
     return 0;

@@ -80,9 +80,6 @@ void DrawMeshInstanced2(Mesh mesh, Material material, int instances, float* boid
 
     rlEnableShader(material.shader.id);
 
-    unsigned int id = 0;
-    glGenBuffers(1, &id);
-
     if (material.shader.locs[SHADER_LOC_COLOR_DIFFUSE] != -1) {
         float values[4] = {
             (float) material.maps[MATERIAL_MAP_DIFFUSE].color.r / 255.0f,
@@ -193,7 +190,7 @@ void render(const BoidList& boid_list, Ui& ui, Rules& rules, Camera2D cam, Camer
     BeginDrawing();
         ClearBackground(BLACK);
 
-        auto const boid_store = boid_list.m_backbuffer;
+        auto const boid_store = boid_list.m_boid_store;
         int offset = 0;
 
         fBeginMode3D(camera);
