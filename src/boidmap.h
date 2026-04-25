@@ -4,7 +4,7 @@
 #include <raylib.h>
 #include <algorithm>
 
-#include ".\task_master\lock.h"
+#include "task_master/lock.h"
 
 typedef int32_t Boid;
 

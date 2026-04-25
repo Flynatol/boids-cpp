@@ -1,10 +1,13 @@
-# CMAKE file based off https://github.com/meemknight/cmakeSetup
-
 cmake_minimum_required(VERSION 3.16)
+
+# CMake 4.x removes compatibility with very old policies used by vendored deps.
+# Set a minimum policy version once at the top so subprojects still configure.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+	set(CMAKE_POLICY_VERSION_MINIMUM "3.5")
+endif()
 
 include(FetchContent)
 
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Release>:Release>")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE) #link time optimization
@@ -39,8 +42,6 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(tracy)
 
-# MY_SOURCES is defined to be a list of all the source files for my game
-# DON'T ADD THE SOURCES BY HAND, they are already added with this macro
 file(GLOB_RECURSE MY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
 add_executable("${CMAKE_PROJECT_NAME}")
@@ -50,7 +51,9 @@ set_property(TARGET "${CMAKE_PROJECT_NAME}" PROPERTY CXX_STANDARD 20)
 target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC GLFW_INCLUDE_NONE=1)
 
 #target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE -march=native)
-target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE /arch:AVX2)
+if(MSVC)
+	target_compile_options("${CMAKE_PROJECT_NAME}" PRIVATE /arch:AVX2)
+endif()
 
 if(PRODUCTION_BUILD)
 	# setup the ASSETS_PATH macro to be in the root folder of your exe
@@ -66,7 +69,7 @@ else()
 
 endif()
 
-target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES} )
+target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES}  )
 
 if(MSVC) # If using the VS compiler...
 
@@ -82,4 +85,3 @@ endif()
 
 target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE raylib imgui rlimgui glfw TracyClient)
 
-target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE )

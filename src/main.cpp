@@ -23,8 +23,8 @@
 #include "boidmap.h"
 #include "ui.h"
 
-#include ".\task_master\taskmaster.h"
-#include ".\task_master\tm_shared.h"
+#include "task_master/taskmaster.h"
+#include "task_master/tm_shared.h"
 
 #include <glad/glad.h>
 
@@ -281,6 +281,25 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
     const auto srs_vec = _mm256_set1_ps(rules->sight_range_squared);
     const auto af_vec  = _mm256_set1_ps(rules->avoid_factor);
 
+    Boid near_row_begin[3] = {-1, -1, -1};
+    Boid near_row_end[3] = {-1, -1, -1};
+
+    for (int cy = -1; cy <= 1; cy++) {
+        Boid row_begin = -1;
+        Boid row_end = -1;
+
+        for (int cx = -1; cx <= 1; cx++) {
+            const Boid current = boid_map->get_coord(y + cy, x + cx);
+            if (current != -1) {
+                if (row_begin == -1) row_begin = current;
+                row_end = current + depth[current];
+            }
+        }
+
+        near_row_begin[cy + 1] = row_begin;
+        near_row_end[cy + 1] = row_end;
+    }
+
     for (Boid current_boid = cell_begin; current_boid < cell_end; current_boid += 8) {
         auto current_xs_vec = _mm256_load_ps(&xs[current_boid]);
         auto current_ys_vec = _mm256_load_ps(&ys[current_boid]);
@@ -297,22 +316,10 @@ inline void update_cell2(const int x, const int y, const Rules *rules, const Boi
 
         __m256i isc = _mm256_set1_epi32(0);
 
-        //For each row
-        for (int cy = -1; cy <= 1; cy++) {
-            Boid row_begin = -1;
-            Boid row_end = -1;
-
-            //Todo check if this would be faster branchless -- probably not worth the readability
-            for (int cx = -1; cx <= 1; cx++) {
-                // This line could be slow
-                Boid current = boid_map->get_coord(y + cy, x + cx);
-                if (current != -1) {
-                    if (row_begin == -1) row_begin = current;
-                    //This line is probably bad too
-                    row_end = current + depth[current];
-                }
-            }
-
+        //For each nearby row
+        for (int row_i = 0; row_i < 3; row_i++) {
+            const Boid row_begin = near_row_begin[row_i];
+            const Boid row_end = near_row_end[row_i];
             // For each block of boids in current row
             for (Boid nearby_boid = row_begin; nearby_boid < row_end; nearby_boid += 8) {
                 auto nearby_xs_vec = _mm256_load_ps(&xs[nearby_boid]);
@@ -598,13 +605,7 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
                                 .task_type = TaskType::ROW_RUNNER,
                                 .argument_struct = &old_args->arg_store[y],
                                 .sync = current_task->sync,
-                                .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task) {
-                                    auto old_args = ((row_runner_args *) current_task->argument_struct);
-                                    //update_non_interacting2(boid_map, old_args->rules, boid_list);
-                                    populate_map2(task_master, current_task->sync, old_args->pop_args, old_args->pop_args->num_tasks);
-
-                                    FrameMarkEnd("Update Boids");
-                                }),
+                                .on_complete = NULL,
                             }
                         );
                         tasks_added++;
@@ -637,48 +638,56 @@ static void swap_buffers(TaskMaster* task_master, Task* current_task) {
 
 void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
     ZoneScoped;
-    task_master->lock.lock();
+    auto* src = boid_list->m_boid_store;
+    auto* dst = boid_list->m_backbuffer;
 
-    auto start = TIME_NOW;
+    const uint32_t boid_count = boid_list->m_size;
+    const uint32_t num_cells = boid_map->m_xsize * boid_map->m_ysize;
 
-    uint32_t tasks_added = 0;
+    Boid* cell_offsets = arg_list->index_buffer;
+    Boid* cell_counts = boid_map->m_index_buffer;
 
-    int counter = 0;
-    const int num_cells = boid_map->m_xsize * boid_map->m_ysize;
-    Boid* ib = arg_list->index_buffer;
-    const Boid* map = boid_map->m_boid_map;
-    const int32_t* depth = boid_list->m_boid_store->depth;
+    memset(cell_counts, 0, sizeof(Boid) * num_cells);
 
-    for (int i = 0; i < num_cells; i++) {
-        ib[i] = counter;
-        const Boid current = map[i];
-        counter += (current != -1) * depth[current];
+    for (uint32_t boid = 0; boid < boid_count; boid++) {
+        const Boid cell = boid_map->get_map_pos_nearest2(src->xs[boid], src->ys[boid]);
+        cell_counts[cell]++;
     }
 
-    auto pre_task_gen = TIME_NOW;
+    Boid running = 0;
+    for (uint32_t cell = 0; cell < num_cells; cell++) {
+        const Boid count = cell_counts[cell];
+        cell_offsets[cell] = running;
 
-    //Generate tasks
-    for (int y = 0; y < boid_map->m_ysize; y++) {
-        task_master->ts_task_buffer.push_back(
-            Task {
-                .task_type = TaskType::REBUILD,
-                .argument_struct = &arg_list[y],
-                .sync = task_monitor,
-                .on_complete = (void *) swap_buffers,
-            }
-        );
-
-        tasks_added++;
+        if (count > 0) {
+            boid_map->m_boid_map[cell] = running;
+            dst->depth[running] = count;
+            running += count;
+        } else {
+            boid_map->m_boid_map[cell] = -1;
+        }
     }
 
-    auto done = TIME_NOW;
+    for (uint32_t boid = 0; boid < boid_count; boid++) {
+        const Boid cell = boid_map->get_map_pos_nearest2(src->xs[boid], src->ys[boid]);
+        const Boid dst_index = cell_offsets[cell]++;
 
-    task_monitor->task_counter += tasks_added;
+        dst->xs[dst_index] = src->xs[boid];
+        dst->ys[dst_index] = src->ys[boid];
+        dst->vxs[dst_index] = src->vxs[boid];
+        dst->vys[dst_index] = src->vys[boid];
+        dst->homes[dst_index] = src->homes[boid];
 
-    //DEBUG("rb_list: %0.4f, comp: %0.4f", std::chrono::duration<double, std::milli>(pre_task_gen - start).count(), std::chrono::duration<double, std::milli>(done - pre_task_gen).count());
+        const Boid cell_begin = boid_map->m_boid_map[cell];
+        const Boid cell_end = cell_begin + cell_counts[cell];
+        dst->index_next[dst_index] = (dst_index + 1 < cell_end) ? (dst_index + 1) : -1;
+    }
 
-    //Go!
-    task_master->lock.unlock();
+    swap_buffers(task_master, NULL);
+
+    if (task_monitor != NULL) {
+        task_monitor->task_counter = 0;
+    }
 }
 
 
@@ -914,7 +923,7 @@ int main(int argc, char* argv[]) {
     rebuild_list2(args_rebuild, &task_master, &task_rebuild);
     task_rebuild.wait();
 
-    FrameMarkStart("Update Boids");
+    // FrameMarkStart("Update Boids");
     update_boids2(args_update, &task_master, &task_update);
     task_update.wait();
 
@@ -925,7 +934,7 @@ int main(int argc, char* argv[]) {
     while (WindowShouldClose() == false){
         auto t_update_start = TIME_NOW;
 
-        FrameMarkStart("Update Boids");
+        // FrameMarkStart("Update Boids");
 
         //TODO move camera stuff to class
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)){

@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
-#include "..\boidlist.h"
-#include "..\boidmap.h"
-#include "..\ui.h"
+#include "../boidlist.h"
+#include "../boidmap.h"
+#include "../ui.h"
 
 enum TaskType {
     POPULATE,

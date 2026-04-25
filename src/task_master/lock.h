@@ -5,8 +5,6 @@
 #endif
 
 #include <Windows.h>
-#include <synchapi.h>
-#include <mutex>
 #include <thread>
 #include <raylib.h>
 
