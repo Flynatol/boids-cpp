@@ -6,7 +6,7 @@
 
 #include <Windows.h>
 #include <thread>
-#include <raylib.h>
+#include <cstdio>
 
 typedef volatile long spinlock_t;
 
@@ -23,13 +23,17 @@ struct Lock {
 
     void lock_debug(uint32_t debug) {
         while (_interlockedbittestandset(&lock_internal, 0)) {
-            TraceLog(LOG_DEBUG, TextFormat("Failed to lock %d", debug));
+            char buffer[64];
+            sprintf_s(buffer, "Failed to lock %u\n", debug);
+            OutputDebugStringA(buffer);
             std::this_thread::yield();
         }
     }
 
     void unlock_debug(uint32_t debug) {
         _interlockedbittestandreset(&lock_internal, 0);
-        TraceLog(LOG_DEBUG, TextFormat("Unlocked %d", debug));
+        char buffer[64];
+        sprintf_s(buffer, "Unlocked %u\n", debug);
+        OutputDebugStringA(buffer);
     }
 };

@@ -3,11 +3,12 @@
 #include <mutex>
 #include <thread>
 #include <algorithm>
+#include <cstdint>
 
 #include "ringbuffer.h"
-#include "tm_shared.h"
 #include "lock.h"
 
+template <typename Spec>
 struct TaskMaster;
 
 // Spawn one less worker thread than number of threads the system has
@@ -30,18 +31,10 @@ struct TaskSync {
     };
 };
 
-struct Task {
-    TaskType task_type;
-    void *argument_struct = NULL;
-
-    TaskSync *sync = NULL;
-
-    void *on_complete = NULL;
-};
-
-void runner(TaskMaster *task_master, uint8_t thread_id);
-
+template <typename Spec>
 struct TaskMaster {
+    using Task = typename Spec::Task;
+
     uint32_t front = 0;
     uint32_t back = 0;
     
@@ -74,7 +67,7 @@ struct TaskMaster {
 
     void start_threads() {
         for (int i = 0; i < num_threads; i++) {
-            threads[i] = std::thread(runner, this, i);
+            threads[i] = std::thread(&TaskMaster::runner, this, i);
         }
     }
 
@@ -82,7 +75,7 @@ struct TaskMaster {
         lock.lock();
         for (int i = 0; i < num_threads; i++) {
             ts_task_buffer.push_back(
-                Task { .task_type = TaskType::STOP }
+                Spec::stop_task()
             );
         }
         lock.unlock();
@@ -91,6 +84,32 @@ struct TaskMaster {
     void join_all() {
         for (int i = 0; i < num_threads; i++) {
             this->threads[i].join();
+        }
+    }
+
+private:
+    static void runner(TaskMaster *task_master, uint8_t thread_id) {
+        while (1) {
+            Task current_task = task_master->get_task();
+
+            if (Spec::execute(task_master, current_task)) {
+                return;
+            }
+
+            task_master->complete(current_task);
+        }
+    }
+
+    void complete(Task &current_task) {
+        if (current_task.sync != NULL) {
+            current_task.sync->tc_lock.lock();
+                if (current_task.on_complete != NULL && current_task.sync->task_counter == 1) {
+                    current_task.sync->task_counter -= 1;
+                    current_task.on_complete(this, &current_task);
+                } else {
+                    current_task.sync->task_counter -= 1;
+                }
+            current_task.sync->tc_lock.unlock();
         }
     }
 };

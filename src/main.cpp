@@ -24,7 +24,6 @@
 #include "ui.h"
 
 #include "task_master/taskmaster.h"
-#include "task_master/tm_shared.h"
 
 #include <glad/glad.h>
 
@@ -64,6 +63,68 @@ static const Vector2 triangle[3] = {
 
 
 typedef int32_t Boid;
+
+enum TaskType {
+    POPULATE,
+    REBUILD,
+    REBUILD_SCATTER,
+    ROW_RUNNER,
+    STOP,
+};
+
+struct rebuild_args {
+    uint32_t y;
+    Boid *index_buffer;
+};
+
+struct populate_args {
+    uint32_t start;
+    uint32_t task_size;
+    rebuild_args* rebuild_args;
+    uint32_t num_tasks;
+};
+
+struct row_runner_args {
+    uint32_t y;
+    Rules *rules;
+    row_runner_args* arg_store;
+    populate_args* pop_args;
+};
+
+struct rebuild_partition_args {
+    uint32_t partition_id;
+};
+
+struct BoidTaskSpec;
+using BoidTaskMaster = TaskMaster<BoidTaskSpec>;
+
+union BoidTaskArg {
+    populate_args* populate;
+    rebuild_args* rebuild;
+    rebuild_partition_args* rebuild_partition;
+    row_runner_args* row_runner;
+};
+
+struct BoidTask {
+    TaskType task_type;
+    BoidTaskArg arg = {};
+
+    TaskSync *sync = NULL;
+
+    void (*on_complete)(BoidTaskMaster *task_master, BoidTask *current_task) = NULL;
+};
+
+struct BoidTaskSpec {
+    using Task = BoidTask;
+
+    static Task stop_task() {
+        return Task { .task_type = TaskType::STOP };
+    }
+
+    static bool execute(BoidTaskMaster *task_master, Task &current_task);
+};
+
+using Task = BoidTask;
 
 BoidList* boid_list;
 BoidMap* boid_map;
@@ -162,9 +223,9 @@ inline void populate_n(const uint32_t start, const uint32_t task_size) {
     }
 }
 
-void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor);
+void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster *task_master, TaskSync *task_monitor);
 
-void populate_map2(TaskMaster *task_master, TaskSync *task_monitor, populate_args* arg_list, uint32_t num_tasks) {
+void populate_map2(BoidTaskMaster *task_master, TaskSync *task_monitor, populate_args* arg_list, uint32_t num_tasks) {
     memset(boid_map->m_boid_map, -1, sizeof(Boid) * boid_map->m_xsize * boid_map->m_ysize);
     task_master->lock.lock();
     uint32_t tasks_added = 0;
@@ -174,11 +235,8 @@ void populate_map2(TaskMaster *task_master, TaskSync *task_monitor, populate_arg
         task_master->ts_task_buffer.push_back(
             Task {
                 .task_type = TaskType::POPULATE,
-                .argument_struct = &arg_list[y],
+                .arg = { .populate = &arg_list[y] },
                 .sync = task_monitor,
-                .on_complete =  (void *) (+[](TaskMaster *task_master, Task *current_task) {
-                    auto old_args = ((populate_args *) current_task->argument_struct);
-                }),
             }
         );
 
@@ -612,54 +670,40 @@ inline void rebuild_scatter_partition(const uint32_t partition_id) {
 }
 
 
-void runner(TaskMaster *task_master, uint8_t thread_id) {
-    while(1) {
-        //Wait for task
-        Task current_task = task_master->get_task();
+bool BoidTaskSpec::execute(BoidTaskMaster *, Task &current_task) {
+    switch (current_task.task_type) {
+        case TaskType::ROW_RUNNER: {
+                auto s = current_task.arg.row_runner;
+                row_runner(s->y, s->rules);
+            }
+            break;
 
-        switch (current_task.task_type) {
-            case TaskType::ROW_RUNNER: {
-                    auto s = ((row_runner_args *) current_task.argument_struct);
-                    row_runner(s->y, s->rules);
-                }
-                break;
+        case TaskType::REBUILD: {
+                auto s = current_task.arg.rebuild;
+                write_row_to_list(s->y, s->index_buffer);
+            }
+            break;
 
-            case TaskType::REBUILD: {
-                    auto s = ((rebuild_args *) current_task.argument_struct);
-                    write_row_to_list(s->y, s->index_buffer);
-                }
-                break;
+        case TaskType::REBUILD_SCATTER: {
+                auto s = current_task.arg.rebuild_partition;
+                rebuild_scatter_partition(s->partition_id);
+            }
+            break;
 
-            case TaskType::REBUILD_SCATTER: {
-                    auto s = ((rebuild_partition_args *) current_task.argument_struct);
-                    rebuild_scatter_partition(s->partition_id);
-                }
-                break;
+        case TaskType::POPULATE: {
+                auto s = current_task.arg.populate;
+                populate_n(s->start, s->task_size);
+            }
+            break;
 
-            case TaskType::POPULATE: {
-                    auto s = ((populate_args *) current_task.argument_struct);
-                    populate_n(s->start, s->task_size);
-                }
-                break;
-
-            case TaskType::STOP:
-                return;
-        }
-
-        if (current_task.sync != NULL) {
-            current_task.sync->tc_lock.lock();
-                if (current_task.on_complete != NULL && current_task.sync->task_counter == 1) {
-                    current_task.sync->task_counter -= 1;
-                    ((void (*)(TaskMaster *, Task *)) current_task.on_complete)(task_master, &current_task);
-                } else {
-                    current_task.sync->task_counter -= 1;
-                }
-            current_task.sync->tc_lock.unlock();
-        }
+        case TaskType::STOP:
+            return true;
     }
+
+    return false;
 }
 
-void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+void update_boids2(row_runner_args* arg_list, BoidTaskMaster *task_master, TaskSync *task_monitor) {
     //  Add tasks to task master
     //  Spin up some threads
     //  Let em go
@@ -671,11 +715,11 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
         task_master->ts_task_buffer.push_back(
             Task {
                 .task_type = TaskType::ROW_RUNNER,
-                .argument_struct = &arg_list[y],
+                .arg = { .row_runner = &arg_list[y] },
                 .sync = task_monitor,
-                .on_complete = (void *) (+[](TaskMaster *task_master, Task *current_task)
+                .on_complete = +[](BoidTaskMaster *task_master, Task *current_task)
                 {
-                    auto old_args = ((row_runner_args *) current_task->argument_struct);
+                    auto old_args = current_task->arg.row_runner;
                     uint32_t tasks_added = 0;
                     task_master->lock.lock();
 
@@ -683,7 +727,7 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
                         task_master->ts_task_buffer.push_back(
                             Task {
                                 .task_type = TaskType::ROW_RUNNER,
-                                .argument_struct = &old_args->arg_store[y],
+                                .arg = { .row_runner = &old_args->arg_store[y] },
                                 .sync = current_task->sync,
                                 .on_complete = NULL,
                             }
@@ -693,7 +737,7 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
 
                     current_task->sync->task_counter = tasks_added;
                     task_master->lock.unlock();
-                }),
+                },
             }
         );
 
@@ -709,14 +753,14 @@ void update_boids2(row_runner_args* arg_list, TaskMaster *task_master, TaskSync 
 
 }
 
-static void swap_buffers(TaskMaster* task_master, Task* current_task) {
+static void swap_buffers(BoidTaskMaster* task_master, Task* current_task) {
     ZoneScoped;
     auto temp = boid_list->m_boid_store;
     boid_list->m_boid_store = boid_list->m_backbuffer;
     boid_list->m_backbuffer = temp;
 }
 
-void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *task_monitor) {
+void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster *task_master, TaskSync *task_monitor) {
     ZoneScoped;
     auto* src = boid_list->m_boid_store;
     auto* dst = boid_list->m_backbuffer;
@@ -779,7 +823,7 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
         task_master->ts_task_buffer.push_back(
             Task {
                 .task_type = TaskType::REBUILD_SCATTER,
-                .argument_struct = &rebuild_partition_task_args[partition_id],
+                .arg = { .rebuild_partition = &rebuild_partition_task_args[partition_id] },
                 .sync = &scatter_sync,
                 .on_complete = NULL,
             }
@@ -1043,7 +1087,7 @@ int main(int argc, char* argv[]) {
     }
     args_populate[0].num_tasks = num_tasks;
 
-    TaskMaster task_master;
+    BoidTaskMaster task_master;
     task_master.start_threads();
 
     TaskSync task_populate;
