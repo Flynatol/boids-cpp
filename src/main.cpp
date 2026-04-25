@@ -15,6 +15,8 @@
 #include <future>
 #include <algorithm>
 #include <limits>
+#include <execution>
+#include <atomic>
 #include <immintrin.h>
 
 #define NO_FONT_AWESOME
@@ -67,6 +69,9 @@ typedef int32_t Boid;
 
 BoidList* boid_list;
 BoidMap* boid_map;
+Boid* boid_cell_scratch;
+std::atomic<int32_t>* boid_cell_counts_atomic;
+std::atomic<int32_t>* boid_cell_offsets_atomic;
 
 struct PerfMonitor {
     int tick_counter = 0;
@@ -641,23 +646,79 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
     auto* src = boid_list->m_boid_store;
     auto* dst = boid_list->m_backbuffer;
 
+    const float* src_xs = src->xs;
+    const float* src_ys = src->ys;
+    const float* src_vxs = src->vxs;
+    const float* src_vys = src->vys;
+    const int32_t* src_homes = src->homes;
+
+    float* dst_xs = dst->xs;
+    float* dst_ys = dst->ys;
+    float* dst_vxs = dst->vxs;
+    float* dst_vys = dst->vys;
+    int32_t* dst_homes = dst->homes;
+
     const uint32_t boid_count = boid_list->m_size;
     const uint32_t num_cells = boid_map->m_xsize * boid_map->m_ysize;
 
     Boid* cell_offsets = arg_list->index_buffer;
     Boid* cell_counts = boid_map->m_index_buffer;
 
-    memset(cell_counts, 0, sizeof(Boid) * num_cells);
+    static uint32_t cached_boid_count = 0;
+    static uint32_t cached_chunk_count = 0;
+    static std::vector<uint32_t> chunk_ids;
 
-    for (uint32_t boid = 0; boid < boid_count; boid++) {
-        const Boid cell = boid_map->get_map_pos_nearest2(src->xs[boid], src->ys[boid]);
-        cell_counts[cell]++;
+    constexpr uint32_t chunk_size = 16384;
+    const uint32_t chunk_count = (boid_count + chunk_size - 1) / chunk_size;
+
+    const float inv_cell_size = 1.0f / (float) boid_map->m_cell_size;
+    const int32_t max_col = boid_map->m_xsize - 1;
+    const int32_t max_row = boid_map->m_ysize - 1;
+    const int32_t xsize = boid_map->m_xsize;
+
+    const auto calc_cell = [&](float x, float y) -> Boid {
+        int32_t col = (int32_t) (x * inv_cell_size);
+        int32_t row = (int32_t) (y * inv_cell_size);
+
+        col = (col < 0) ? 0 : ((col > max_col) ? max_col : col);
+        row = (row < 0) ? 0 : ((row > max_row) ? max_row : row);
+
+        return row * xsize + col;
+    };
+
+    if (cached_boid_count != boid_count || cached_chunk_count != chunk_count) {
+        chunk_ids.resize(chunk_count);
+        for (uint32_t i = 0; i < chunk_count; i++) {
+            chunk_ids[i] = i;
+        }
+        cached_boid_count = boid_count;
+        cached_chunk_count = chunk_count;
+    }
+
+    for (uint32_t cell = 0; cell < num_cells; cell++) {
+        boid_cell_counts_atomic[cell].store(0, std::memory_order_relaxed);
+    }
+
+    std::for_each(std::execution::par, chunk_ids.begin(), chunk_ids.end(), [&](uint32_t chunk_id) {
+        const uint32_t begin = chunk_id * chunk_size;
+        const uint32_t end = std::min(begin + chunk_size, boid_count);
+
+        for (uint32_t boid = begin; boid < end; boid++) {
+            const Boid cell = calc_cell(src_xs[boid], src_ys[boid]);
+            boid_cell_scratch[boid] = cell;
+            boid_cell_counts_atomic[cell].fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    for (uint32_t cell = 0; cell < num_cells; cell++) {
+        cell_counts[cell] = boid_cell_counts_atomic[cell].load(std::memory_order_relaxed);
     }
 
     Boid running = 0;
     for (uint32_t cell = 0; cell < num_cells; cell++) {
         const Boid count = cell_counts[cell];
         cell_offsets[cell] = running;
+        boid_cell_offsets_atomic[cell].store(running, std::memory_order_relaxed);
 
         if (count > 0) {
             boid_map->m_boid_map[cell] = running;
@@ -668,19 +729,36 @@ void rebuild_list2(rebuild_args* arg_list, TaskMaster *task_master, TaskSync *ta
         }
     }
 
+    std::for_each(std::execution::par, chunk_ids.begin(), chunk_ids.end(), [&](uint32_t chunk_id) {
+        const uint32_t begin = chunk_id * chunk_size;
+        const uint32_t end = std::min(begin + chunk_size, boid_count);
+
+        for (uint32_t boid = begin; boid < end; boid++) {
+            const Boid cell = boid_cell_scratch[boid];
+            const Boid dst_index = boid_cell_offsets_atomic[cell].fetch_add(1, std::memory_order_relaxed);
+
+            dst_xs[dst_index] = src_xs[boid];
+            dst_ys[dst_index] = src_ys[boid];
+            dst_vxs[dst_index] = src_vxs[boid];
+            dst_vys[dst_index] = src_vys[boid];
+            dst_homes[dst_index] = src_homes[boid];
+        }
+    });
+
     for (uint32_t boid = 0; boid < boid_count; boid++) {
-        const Boid cell = boid_map->get_map_pos_nearest2(src->xs[boid], src->ys[boid]);
-        const Boid dst_index = cell_offsets[cell]++;
+        dst->index_next[boid] = boid + 1;
+    }
+    if (boid_count > 0) {
+        dst->index_next[boid_count - 1] = -1;
+    }
 
-        dst->xs[dst_index] = src->xs[boid];
-        dst->ys[dst_index] = src->ys[boid];
-        dst->vxs[dst_index] = src->vxs[boid];
-        dst->vys[dst_index] = src->vys[boid];
-        dst->homes[dst_index] = src->homes[boid];
-
-        const Boid cell_begin = boid_map->m_boid_map[cell];
-        const Boid cell_end = cell_begin + cell_counts[cell];
-        dst->index_next[dst_index] = (dst_index + 1 < cell_end) ? (dst_index + 1) : -1;
+    for (uint32_t cell = 0; cell < num_cells; cell++) {
+        const Boid count = cell_counts[cell];
+        if (count > 0) {
+            const Boid head = boid_map->m_boid_map[cell];
+            dst->depth[head] = count;
+            dst->index_next[head + count - 1] = -1;
+        }
     }
 
     swap_buffers(task_master, NULL);
@@ -884,6 +962,9 @@ int main(int argc, char* argv[]) {
     auto args_rebuild = new rebuild_args[boid_map->m_ysize];
 
     Boid *index_buffer = (Boid *) malloc(boid_map->m_xsize * boid_map->m_ysize * sizeof(Boid));
+    boid_cell_scratch = (Boid *) malloc(boid_list->m_size * sizeof(Boid));
+    boid_cell_counts_atomic = new std::atomic<int32_t>[boid_map->m_xsize * boid_map->m_ysize];
+    boid_cell_offsets_atomic = new std::atomic<int32_t>[boid_map->m_xsize * boid_map->m_ysize];
 
     for (uint32_t i = 0; i < boid_map->m_ysize; i++) {
         args_update[i] = row_runner_args {
