@@ -25,7 +25,7 @@ void Ui::UpdateRulesWindow(Rules &rules) {
     ImGui::SliderFloat("avoid_factor", &rules.avoid_factor, 0., 1., "%0.9f");
     ImGui::SliderFloat("cohesion_factor", &rules.cohesion_factor, 0., 1., "%0.9f");
     ImGui::SliderFloat("rand", &rules.rand, 0., 1., "%0.9f");
-    ImGui::SliderFloat("homing", &rules.homing, 0., 1., "%0.9f");
+    ImGui::SliderFloat("homing", &rules.homing, 0., 0.001, "%0.9f");
     ImGui::SliderInt("edge_width", &rules.edge_width, 0, 100, "%d");
     ImGui::SliderFloat("edge_factor", &rules.edge_factor, 0., 1., "%0.9f");
     ImGui::Checkbox("Show Debug Lines", &rules.show_lines);

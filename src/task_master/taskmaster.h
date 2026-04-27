@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <semaphore>
 #include <thread>
 #include <algorithm>
 #include <cstdint>
@@ -38,10 +39,11 @@ struct TaskMaster {
     uint32_t front = 0;
     uint32_t back = 0;
     
-    // Enable thread sleeping (tiny performance decrease but means performance usage scales down when there are few boids)
+    #define USE_SEMAPHORE
     bool sleep_enabled = true;
 
     RingBufferMPMC<Task, 4096> ts_task_buffer;
+    std::counting_semaphore<4096> task_semaphore{0};
     std::thread threads[64];
 
     Lock lock;
@@ -52,11 +54,17 @@ struct TaskMaster {
         //This should hang until a task is available
         try_lock:
 
+#ifdef USE_SEMAPHORE
+            task_semaphore.acquire();
+#endif
+
         //Aquire front lock
         this->lock.lock();
             if (!(this->ts_task_buffer.pop_front(task))) {
                 this->lock.unlock();
-                if (sleep_enabled) nanosleep(10000);
+#ifndef USE_SEMAPHORE
+                if (!sleep_enabled) nanosleep(10000);
+#endif
                 goto try_lock;
             }
         this->lock.unlock();
@@ -67,7 +75,7 @@ struct TaskMaster {
 
     void start_threads() {
         for (int i = 0; i < num_threads; i++) {
-            threads[i] = std::thread(&TaskMaster::runner, this, i);
+            threads[i] = std::thread(&TaskMaster::runner, this);
         }
     }
 
@@ -79,6 +87,9 @@ struct TaskMaster {
             );
         }
         lock.unlock();
+#ifdef USE_SEMAPHORE
+        task_semaphore.release(num_threads);
+#endif
     }
 
     void join_all() {
@@ -88,8 +99,8 @@ struct TaskMaster {
     }
 
 private:
-    static void runner(TaskMaster *task_master, uint8_t thread_id) {
-        while (1) {
+    static void runner(TaskMaster *task_master) {
+        while (true) {
             Task current_task = task_master->get_task();
 
             if (Spec::execute(task_master, current_task)) {

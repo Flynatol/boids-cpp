@@ -25,6 +25,21 @@ public:
         return result;
     }
 
+    inline bool push_all_back(const T* items, size_t count)
+    {
+        const size_t t = tail;
+        const size_t free_slots = (t + capacity - head - 1) % capacity;
+        if (count > free_slots) return false;
+
+        size_t h = head;
+        for (size_t i = 0; i < count; i++) {
+            data[h] = items[i];
+            h = (h + 1) % capacity;
+        }
+        head = h;
+        return true;
+    }
+
     inline bool unsafe_not_empty() {
         size_t next = (head + 1) % capacity;
         return (next != tail);
@@ -66,6 +81,21 @@ struct RingBufferMPMC       // header-only swap-in
         return true;
     }
 
+    bool push_all_back(const T* values, size_t count) {
+        const size_t h = head.load(std::memory_order_relaxed);
+        const size_t t = tail.load(std::memory_order_acquire);
+        const size_t free_slots = (t + capacity - h - 1) % capacity;
+        if (count > free_slots) return false;
+
+        size_t out = h;
+        for (size_t i = 0; i < count; i++) {
+            data[out] = values[i];
+            out = (out + 1) % capacity;
+        }
+        head.store(out, std::memory_order_release);
+        return true;
+    }
+
     bool pop_front(T& out) {
         size_t t = tail.load(std::memory_order_relaxed);
         if (t == head.load(std::memory_order_acquire)) return false;
@@ -74,5 +104,4 @@ struct RingBufferMPMC       // header-only swap-in
         return true;
     }
 };
-
 

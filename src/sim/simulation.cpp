@@ -1,31 +1,17 @@
 #include "sim/simulation.h"
 
+#include <algorithm>
+#include <cstring>
 #include <cmath>
 #include <immintrin.h>
 #include <limits>
+#include <vector>
 
 #include "app/app_config.h"
 #include "ui/ui.h"
 
 BoidList* boid_list;
 BoidMap* boid_map;
-Boid* boid_cell_scratch;
-int32_t* boid_partition_cell_offsets;
-rebuild_partition_args* rebuild_partition_task_args;
-
-struct RebuildPassContext {
-    BoidStore* src;
-    BoidStore* dst;
-    uint32_t boid_count;
-    uint32_t num_cells;
-    uint32_t partition_count;
-    float inv_cell_size;
-    int32_t max_col;
-    int32_t max_row;
-    int32_t xsize;
-};
-
-RebuildPassContext rebuild_pass_ctx;
 
 namespace {
 
@@ -62,7 +48,7 @@ inline void write_map_to_list(int map_cell, const Boid* index_buffer) {
 }
 
 void write_row_to_list(const uint32_t row, const Boid* index_buffer) {
-    ZoneScoped;
+    ZoneScopedN("rebuild_row_copy_task");
     for (int x = 0; x < boid_map->m_xsize; x += 1) {
         write_map_to_list(boid_map->m_xsize * row + x, index_buffer);
     }
@@ -317,7 +303,6 @@ inline void row_runner(const int y, const Rules* rules) {
     ZoneScoped;
     static const bool use_avx512 = boids_cpu_supports_avx512();
 
-#ifndef RUNNER_STORE
     for (int x = 0; x < boid_map->m_xsize; x++) {
         if (use_avx512) {
             update_cell2_avx512(x, y, rules, boid_list);
@@ -325,92 +310,13 @@ inline void row_runner(const int y, const Rules* rules) {
             update_cell2(x, y, rules, boid_list);
         }
     }
-#endif
-
-#ifdef RUNNER_STORE
-    Boid first_cell_begin = -1;
-    Boid last_cell_begin = -1;
-
-    for (int x = 0; x < boid_map->m_xsize; x++) {
-        Boid cell_begin = boid_map->m_boid_map[y * boid_map->m_xsize + x];
-
-        if (first_cell_begin == -1) first_cell_begin = cell_begin;
-        if (cell_begin != -1) last_cell_begin = cell_begin;
-        update_cell2(x, y, rules, boid_list);
-    }
-
-    if (first_cell_begin == -1) return;
-    Boid last_cell_end = last_cell_begin + boid_list->m_boid_store->depth[last_cell_begin];
-
-    Boid boid;
-    for (boid = first_cell_begin; boid < (last_cell_end - 8); boid += 8) {
-        _mm256_store_ps(&boid_list->m_boid_store->xs[boid], _mm256_add_ps(_mm256_load_ps(&boid_list->m_boid_store->vxs[boid]), _mm256_load_ps(&boid_list->m_boid_store->xs[boid])));
-        _mm256_store_ps(&boid_list->m_boid_store->ys[boid], _mm256_add_ps(_mm256_load_ps(&boid_list->m_boid_store->vys[boid]), _mm256_load_ps(&boid_list->m_boid_store->ys[boid])));
-    }
-
-    auto temp = _mm256_add_ps(_mm256_set1_ps((float) boid), _mm256_set_ps(7., 6., 5., 4., 3., 2., 1., 0.));
-    auto out_mask = _mm256_cmp_ps(temp, _mm256_set1_ps(last_cell_end), _CMP_LT_OS);
-
-    _mm256_store_ps(&boid_list->m_boid_store->xs[boid], _mm256_add_ps(_mm256_and_ps(_mm256_load_ps(&boid_list->m_boid_store->vxs[boid]), out_mask), _mm256_load_ps(&boid_list->m_boid_store->xs[boid])));
-    _mm256_store_ps(&boid_list->m_boid_store->ys[boid], _mm256_add_ps(_mm256_and_ps(_mm256_load_ps(&boid_list->m_boid_store->vys[boid]), out_mask), _mm256_load_ps(&boid_list->m_boid_store->ys[boid])));
-#endif
 }
 
-inline Boid rebuild_calc_cell(float x, float y) {
-    int32_t col = (int32_t) (x * rebuild_pass_ctx.inv_cell_size);
-    int32_t row = (int32_t) (y * rebuild_pass_ctx.inv_cell_size);
-
-    col = (col < 0) ? 0 : ((col > rebuild_pass_ctx.max_col) ? rebuild_pass_ctx.max_col : col);
-    row = (row < 0) ? 0 : ((row > rebuild_pass_ctx.max_row) ? rebuild_pass_ctx.max_row : row);
-
-    return row * rebuild_pass_ctx.xsize + col;
-}
-
-inline void rebuild_count_partition(const uint32_t partition_id) {
-    const uint32_t begin = (rebuild_pass_ctx.boid_count * partition_id) / rebuild_pass_ctx.partition_count;
-    const uint32_t end = (rebuild_pass_ctx.boid_count * (partition_id + 1)) / rebuild_pass_ctx.partition_count;
-
-    int32_t* local_counts = boid_partition_cell_offsets + ((size_t) partition_id * rebuild_pass_ctx.num_cells);
-    const float* src_xs = rebuild_pass_ctx.src->xs;
-    const float* src_ys = rebuild_pass_ctx.src->ys;
-
-    memset(local_counts, 0, sizeof(int32_t) * rebuild_pass_ctx.num_cells);
-
-    for (uint32_t boid = begin; boid < end; boid++) {
-        const Boid cell = rebuild_calc_cell(src_xs[boid], src_ys[boid]);
-        boid_cell_scratch[boid] = cell;
-        local_counts[cell]++;
-    }
-}
-
-inline void rebuild_scatter_partition(const uint32_t partition_id) {
-    const uint32_t begin = (rebuild_pass_ctx.boid_count * partition_id) / rebuild_pass_ctx.partition_count;
-    const uint32_t end = (rebuild_pass_ctx.boid_count * (partition_id + 1)) / rebuild_pass_ctx.partition_count;
-
-    int32_t* local_offsets = boid_partition_cell_offsets + ((size_t) partition_id * rebuild_pass_ctx.num_cells);
-
-    const float* src_xs = rebuild_pass_ctx.src->xs;
-    const float* src_ys = rebuild_pass_ctx.src->ys;
-    const float* src_vxs = rebuild_pass_ctx.src->vxs;
-    const float* src_vys = rebuild_pass_ctx.src->vys;
-    const int32_t* src_homes = rebuild_pass_ctx.src->homes;
-
-    float* dst_xs = rebuild_pass_ctx.dst->xs;
-    float* dst_ys = rebuild_pass_ctx.dst->ys;
-    float* dst_vxs = rebuild_pass_ctx.dst->vxs;
-    float* dst_vys = rebuild_pass_ctx.dst->vys;
-    int32_t* dst_homes = rebuild_pass_ctx.dst->homes;
-
-    for (uint32_t boid = begin; boid < end; boid++) {
-        const Boid cell = boid_cell_scratch[boid];
-        const Boid dst_index = local_offsets[cell]++;
-
-        dst_xs[dst_index] = src_xs[boid];
-        dst_ys[dst_index] = src_ys[boid];
-        dst_vxs[dst_index] = src_vxs[boid];
-        dst_vys[dst_index] = src_vys[boid];
-        dst_homes[dst_index] = src_homes[boid];
-    }
+void swap_buffers() {
+    ZoneScoped;
+    auto* temp = boid_list->m_boid_store;
+    boid_list->m_boid_store = boid_list->m_backbuffer;
+    boid_list->m_backbuffer = temp;
 }
 
 } // namespace
@@ -425,11 +331,6 @@ bool BoidTaskSpec::execute(BoidTaskMaster*, Task& current_task) {
         case TaskType::REBUILD: {
             auto s = current_task.arg.rebuild;
             write_row_to_list(s->y, s->index_buffer);
-            break;
-        }
-        case TaskType::REBUILD_SCATTER: {
-            auto s = current_task.arg.rebuild_partition;
-            rebuild_scatter_partition(s->partition_id);
             break;
         }
         case TaskType::POPULATE: {
@@ -463,6 +364,9 @@ void populate_map2(BoidTaskMaster* task_master, TaskSync* task_monitor, populate
 
     task_monitor->task_counter += tasks_added;
     task_master->lock.unlock();
+    if (task_master->sleep_enabled) {
+        task_master->task_semaphore.release(tasks_added);
+    }
 }
 
 void update_boids2(row_runner_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor) {
@@ -488,98 +392,121 @@ void update_boids2(row_runner_args* arg_list, BoidTaskMaster* task_master, TaskS
     task_monitor->tc_lock.unlock();
 
     task_master->lock.unlock();
+    if (task_master->sleep_enabled) {
+        task_master->task_semaphore.release(tasks_added);
+    }
 }
 
-void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor) {
-    ZoneScoped;
-    auto* src = boid_list->m_backbuffer;
-    auto* dst = boid_list->m_boid_store;
+namespace {
+
+void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster* task_master) {
+    ZoneScopedN("rebuild_list2");
+    swap_buffers();
+
     const uint32_t boid_count = boid_list->m_size;
     const uint32_t num_cells = boid_map->m_xsize * boid_map->m_ysize;
-    const uint32_t partition_count = num_threads;
+
+    constexpr uint32_t task_size = 10000;
+    const uint32_t populate_task_count = (boid_count + (task_size - 1)) / task_size;
+    static std::vector<populate_args> populate_arg_store;
+    static std::vector<Task> populate_task_store;
+    static TaskSync populate_sync;
+
+    const bool rebuild_populate_tasks = populate_arg_store.size() != populate_task_count || populate_task_store.size() != populate_task_count;
+    if (rebuild_populate_tasks) {
+        populate_arg_store.resize(populate_task_count);
+        populate_task_store.resize(populate_task_count);
+    }
+
+    if (rebuild_populate_tasks) {
+        for (uint32_t i = 0; i < populate_task_count; i++) {
+            populate_arg_store[i] = populate_args {
+                .start = i * task_size,
+                .task_size = std::min(task_size, boid_count - (i * task_size)),
+                .rebuild_args = arg_list,
+                .num_tasks = populate_task_count,
+            };
+            populate_task_store[i] = Task {
+                .task_type = TaskType::POPULATE,
+                .arg = { .populate = &populate_arg_store[i] },
+                .sync = &populate_sync,
+                .on_complete = nullptr,
+            };
+        }
+    }
+    {
+        ZoneScopedN("rebuild_row_memset");
+        memset(boid_map->m_boid_map, -1, sizeof(Boid) * boid_map->m_xsize * boid_map->m_ysize);
+    }
+    {
+        ZoneScopedN("rebuild_row_populate_enqueue");
+        task_master->lock.lock();
+        task_master->ts_task_buffer.push_all_back(populate_task_store.data(), populate_task_count);
+        populate_sync.task_counter += populate_task_count;
+        task_master->lock.unlock();
+        if (task_master->sleep_enabled) {
+            task_master->task_semaphore.release(populate_task_count);
+        }
+    }
+    {
+        ZoneScopedN("rebuild_row_populate_wait");
+        populate_sync.wait();
+    }
 
     Boid* cell_offsets = arg_list->index_buffer;
     Boid* cell_counts = boid_map->m_index_buffer;
+    const Boid* map = boid_map->m_boid_map;
+    const int32_t* depth = boid_list->m_boid_store->depth;
 
-    rebuild_pass_ctx = RebuildPassContext {
-        .src = src,
-        .dst = dst,
-        .boid_count = boid_count,
-        .num_cells = num_cells,
-        .partition_count = partition_count,
-        .inv_cell_size = 1.0f / (float) boid_map->m_cell_size,
-        .max_col = boid_map->m_xsize - 1,
-        .max_row = boid_map->m_ysize - 1,
-        .xsize = boid_map->m_xsize,
-    };
-
-    for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
-        rebuild_count_partition(partition_id);
-    }
-
-    Boid running = 0;
-    for (uint32_t cell = 0; cell < num_cells; cell++) {
-        Boid count = 0;
-        for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
-            int32_t* local_counts = boid_partition_cell_offsets + ((size_t) partition_id * num_cells);
-            count += local_counts[cell];
-        }
-
-        cell_counts[cell] = count;
-        cell_offsets[cell] = running;
-
-        Boid local_base = running;
-        for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
-            int32_t* local_counts = boid_partition_cell_offsets + ((size_t) partition_id * num_cells);
-            const Boid local_count = local_counts[cell];
-            local_counts[cell] = local_base;
-            local_base += local_count;
-        }
-
-        if (count > 0) {
-            boid_map->m_boid_map[cell] = running;
-            dst->depth[running] = count;
+    {
+        ZoneScopedN("rebuild_row_prefix_offsets");
+        Boid running = 0;
+        for (uint32_t cell = 0; cell < num_cells; cell++) {
+            const Boid current = map[cell];
+            const Boid count = (current != -1) ? depth[current] : 0;
+            cell_offsets[cell] = running;
+            cell_counts[cell] = count;
             running += count;
-        } else {
-            boid_map->m_boid_map[cell] = -1;
         }
     }
 
-    TaskSync scatter_sync;
-    uint32_t scatter_tasks_added = 0;
+    TaskSync row_sync;
+    uint32_t row_tasks_added = 0;
 
-    task_master->lock.lock();
-    for (uint32_t partition_id = 0; partition_id < partition_count; partition_id++) {
-        task_master->ts_task_buffer.push_back(
-            Task {
-                .task_type = TaskType::REBUILD_SCATTER,
-                .arg = { .rebuild_partition = &rebuild_partition_task_args[partition_id] },
-                .sync = &scatter_sync,
-                .on_complete = nullptr,
-            }
-        );
-        scatter_tasks_added++;
-    }
-    scatter_sync.task_counter += scatter_tasks_added;
-    task_master->lock.unlock();
-
-    scatter_sync.wait();
-
-    for (uint32_t boid = 0; boid < boid_count; boid++) {
-        dst->index_next[boid] = boid + 1;
-    }
-    if (boid_count > 0) {
-        dst->index_next[boid_count - 1] = -1;
-    }
-
-    for (uint32_t cell = 0; cell < num_cells; cell++) {
-        const Boid count = cell_counts[cell];
-        if (count > 0) {
-            const Boid head = boid_map->m_boid_map[cell];
-            dst->depth[head] = count;
-            dst->index_next[head + count - 1] = -1;
+    {
+        ZoneScopedN("rebuild_row_copy_enqueue");
+        task_master->lock.lock();
+        for (int y = 0; y < boid_map->m_ysize; y++) {
+            task_master->ts_task_buffer.push_back(
+                Task {
+                    .task_type = TaskType::REBUILD,
+                    .arg = { .rebuild = &arg_list[y] },
+                    .sync = &row_sync,
+                    .on_complete = nullptr,
+                }
+            );
+            row_tasks_added++;
+        }
+        row_sync.task_counter += row_tasks_added;
+        task_master->lock.unlock();
+        if (task_master->sleep_enabled) {
+            task_master->task_semaphore.release(row_tasks_added);
         }
     }
+
+    {
+        ZoneScopedN("rebuild_row_copy_wait");
+        row_sync.wait();
+    }
+
+    swap_buffers();
+}
+
+} // namespace
+
+void rebuild_list2(rebuild_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor) {
+    ZoneScoped;
+    rebuild_list2(arg_list, task_master);
 
     if (task_monitor != nullptr) {
         task_monitor->task_counter = 0;

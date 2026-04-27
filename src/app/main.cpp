@@ -93,27 +93,16 @@ int main(int argc, char* argv[]) {
     auto args_rebuild = new rebuild_args[boid_map->m_ysize];
 
     Boid* index_buffer = (Boid*) malloc(boid_map->m_xsize * boid_map->m_ysize * sizeof(Boid));
-    boid_cell_scratch = (Boid*) malloc(boid_list->m_size * sizeof(Boid));
-    boid_partition_cell_offsets = (int32_t*) malloc(sizeof(int32_t) * num_threads * boid_map->m_xsize * boid_map->m_ysize);
-    rebuild_partition_task_args = new rebuild_partition_args[num_threads];
 
     for (uint32_t i = 0; i < boid_map->m_ysize; i++) {
         args_update[i] = row_runner_args {
             .y = i,
             .rules = &rules,
-            .arg_store = args_update,
-            .pop_args = args_populate,
         };
 
         args_rebuild[i] = rebuild_args {
             .y = i,
             .index_buffer = index_buffer,
-        };
-    }
-
-    for (uint32_t partition_id = 0; partition_id < num_threads; partition_id++) {
-        rebuild_partition_task_args[partition_id] = rebuild_partition_args {
-            .partition_id = partition_id,
         };
     }
 
@@ -214,9 +203,6 @@ int main(int argc, char* argv[]) {
     delete[] args_update;
     delete[] args_rebuild;
     free(index_buffer);
-    free(boid_cell_scratch);
-    free(boid_partition_cell_offsets);
-    delete[] rebuild_partition_task_args;
 
     UnloadMaterial(mat_instances);
     UnloadShader(boid_shader);

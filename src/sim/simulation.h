@@ -11,7 +11,6 @@ struct Rules;
 enum TaskType {
     POPULATE,
     REBUILD,
-    REBUILD_SCATTER,
     ROW_RUNNER,
     STOP,
 };
@@ -31,12 +30,6 @@ struct populate_args {
 struct row_runner_args {
     uint32_t y;
     Rules* rules;
-    row_runner_args* arg_store;
-    populate_args* pop_args;
-};
-
-struct rebuild_partition_args {
-    uint32_t partition_id;
 };
 
 struct BoidTaskSpec;
@@ -45,7 +38,6 @@ using BoidTaskMaster = TaskMaster<BoidTaskSpec>;
 union BoidTaskArg {
     populate_args* populate;
     rebuild_args* rebuild;
-    rebuild_partition_args* rebuild_partition;
     row_runner_args* row_runner;
 };
 
@@ -70,9 +62,6 @@ using Task = BoidTask;
 
 extern BoidList* boid_list;
 extern BoidMap* boid_map;
-extern Boid* boid_cell_scratch;
-extern int32_t* boid_partition_cell_offsets;
-extern rebuild_partition_args* rebuild_partition_task_args;
 
 void populate_map2(BoidTaskMaster* task_master, TaskSync* task_monitor, populate_args* arg_list, uint32_t num_tasks);
 void update_boids2(row_runner_args* arg_list, BoidTaskMaster* task_master, TaskSync* task_monitor);

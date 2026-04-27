@@ -26,7 +26,6 @@ constexpr int SHADER_LOC_BOID_VX = 28;
 constexpr int SHADER_LOC_BOID_VY = 29;
 
 //#define DEBUG_ENABLED
-//#define RUNNER_STORE
 #define APPROXIMATE_NEIGHBOR_AVERAGES
 
 #ifdef DEBUG_ENABLED
